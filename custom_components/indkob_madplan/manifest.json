@@ -1,0 +1,22 @@
+{
+  "domain": "indkob_madplan",
+  "name": "Indkøb & Madplan",
+  "codeowners": [
+    "@titansm"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "todo",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/titansm/ha-indkob-madplan",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/titansm/ha-indkob-madplan/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.2.0"
+}

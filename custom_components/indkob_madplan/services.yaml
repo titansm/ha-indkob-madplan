@@ -1,0 +1,34 @@
+importer:
+  fields:
+    note:
+      required: true
+      selector:
+        select:
+          options: [indkob, madplan]
+    tekst:
+      required: true
+      selector:
+        text:
+          multiline: true
+eksporter:
+tilfoej:
+  fields:
+    varer:
+      required: true
+      selector:
+        text:
+          multiple: true
+tilfoej_forslag:
+  fields:
+    varer:
+      required: false
+      selector:
+        text:
+          multiple: true
+hent_statistik:
+nulstil_statistik:
+  fields:
+    bekraeft:
+      required: true
+      selector:
+        boolean:
