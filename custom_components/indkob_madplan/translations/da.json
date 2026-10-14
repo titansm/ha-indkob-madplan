@@ -1,0 +1,129 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Indkøb & Madplan",
+        "data": {
+          "frost_day": "Optøning gælder retten for",
+          "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
+          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)"
+        },
+        "data_description": {
+          "extra_koed_ord": "Fx: nasi goreng, tacos",
+          "ignorer_ord": "Fx: bacon"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Allerede sat op",
+      "single_instance_allowed": "Kun én opsætning er tilladt"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Indkøb & Madplan",
+        "data": {
+          "frost_day": "Optøning gælder retten for",
+          "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
+          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)"
+        },
+        "data_description": {
+          "extra_koed_ord": "Fx: nasi goreng, tacos",
+          "ignorer_ord": "Fx: bacon"
+        }
+      }
+    }
+  },
+  "selector": {
+    "frost_day": {
+      "options": {
+        "i_dag": "I dag (samme dag som retten)",
+        "i_morgen": "I morgen (aftenen før)"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "aftensmad_i_dag": {
+        "name": "Aftensmad i dag"
+      },
+      "aftensmad_i_morgen": {
+        "name": "Aftensmad i morgen"
+      },
+      "madplan": {
+        "name": "Madplan"
+      },
+      "koebt_denne_uge": {
+        "name": "Købt denne uge"
+      },
+      "forslag": {
+        "name": "Plejer at købe"
+      }
+    },
+    "binary_sensor": {
+      "tag_koed_op": {
+        "name": "Tag kød op af fryseren"
+      }
+    },
+    "todo": {
+      "indkobsliste": {
+        "name": "Indkøbsliste"
+      }
+    }
+  },
+  "services": {
+    "tilfoej_forslag": {
+      "name": "Tilføj forslag til listen",
+      "description": "Tilføj varer I plejer at købe, som mangler på listen.",
+      "fields": {
+        "varer": {
+          "name": "Varer",
+          "description": "Kun disse forslag (tom = alle)."
+        }
+      }
+    },
+    "hent_statistik": {
+      "name": "Hent statistik",
+      "description": "Returnerer al indkøbsstatistik og madplan."
+    },
+    "nulstil_statistik": {
+      "name": "Nulstil statistik",
+      "description": "Sletter al købshistorik.",
+      "fields": {
+        "bekraeft": {
+          "name": "Bekræft",
+          "description": "Skal være slået til."
+        }
+      }
+    },
+    "importer": {
+      "name": "Importér note",
+      "description": "Erstat en note med tekst (indkøbsliste: én vare pr. linje, [x] = afkrydset, CAPS = overskrift).",
+      "fields": {
+        "note": {
+          "name": "Note",
+          "description": "indkob eller madplan."
+        },
+        "tekst": {
+          "name": "Tekst",
+          "description": "Notens nye indhold."
+        }
+      }
+    },
+    "eksporter": {
+      "name": "Eksportér noter",
+      "description": "Returnerer begge noter som tekst."
+    },
+    "tilfoej": {
+      "name": "Tilføj varer",
+      "description": "Tilføj varer til indkøbslisten under den overskrift, de plejer at stå under.",
+      "fields": {
+        "varer": {
+          "name": "Varer",
+          "description": "En eller flere varer."
+        }
+      }
+    }
+  }
+}
