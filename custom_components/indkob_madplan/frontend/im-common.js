@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -104,6 +104,9 @@ class ImStore {
   uncheckAll() {
     return this.send("indkob/uncheck_all");
   }
+  move(id, after_id) {
+    return this.send("indkob/move", { line_id: id, after_id });
+  }
   setMadplan(text, base_version) {
     return this.send("madplan/set", { text, base_version });
   }
@@ -123,7 +126,7 @@ export function getStore(hass) {
 /* ------------------------------------------------------------------ tjekliste
  * Nøglede rækker, så et felt man skriver i ikke overskrives af fjernopdateringer. */
 export class Checklist {
-  constructor(container, store, { editable = true, hideChecked = false, onFocusLine = null } = {}) {
+  constructor(container, store, { editable = true, hideChecked = false, onFocusLine = null, scroller = null } = {}) {
     this.el = container;
     this.store = store;
     this.editable = editable;
@@ -133,9 +136,18 @@ export class Checklist {
     this.rows = new Map();
     this.dirty = new Map(); // id -> timer
     this.focusId = null;
+    this.scroller = scroller;
+    this.drag = null;
+    this._pending = null;
     this.el.classList.add("cl");
     this.el.addEventListener("click", (e) => this._click(e));
     if (editable) {
+      // Træk-håndtag: flyt en vare op/ned på listen (fx ind under en anden overskrift)
+      this.el.addEventListener("pointerdown", (e) => {
+        const grip = e.target.closest(".grip");
+        if (grip && e.button === 0) this._dragStart(e, grip);
+      });
+      this.el.addEventListener("contextmenu", (e) => e.target.closest(".grip") && e.preventDefault());
       this.el.addEventListener("input", (e) => this._input(e));
       this.el.addEventListener("keydown", (e) => this._key(e));
       this.el.addEventListener("focusin", (e) => {
@@ -151,8 +163,121 @@ export class Checklist {
   }
 
   setLines(lines) {
+    if (this.drag) {
+      this._pending = lines || [];
+      return;
+    }
     this.lines = lines || [];
     this.render();
+  }
+
+  /* ------------------------------------------------------------ træk og slip */
+  _visibleSibling(row, dir) {
+    let r = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+    while (r && r.hidden) r = dir < 0 ? r.previousElementSibling : r.nextElementSibling;
+    return r;
+  }
+
+  _dragStart(e, grip) {
+    const row = grip.closest("[data-id]");
+    if (!row || this.drag) return;
+    e.preventDefault();
+    this._flush(row.dataset.id);
+    const ae = this.el.getRootNode().activeElement;
+    if (ae && this.el.contains(ae)) ae.blur();
+    grip.setPointerCapture?.(e.pointerId);
+    this.drag = { id: row.dataset.id, row, grip, startY: e.clientY, y: e.clientY, pointerId: e.pointerId, raf: 0 };
+    row.classList.add("dragging");
+    this.el.classList.add("sorting");
+    if (navigator.vibrate) navigator.vibrate(10);
+    this._onMove = (ev) => ev.pointerId === this.drag?.pointerId && this._dragMove(ev);
+    this._onUp = (ev) => ev.pointerId === this.drag?.pointerId && this._dragEnd(ev.type === "pointercancel");
+    grip.addEventListener("pointermove", this._onMove);
+    grip.addEventListener("pointerup", this._onUp);
+    grip.addEventListener("pointercancel", this._onUp);
+    this._autoScroll();
+  }
+
+  _dragMove(e) {
+    e.preventDefault();
+    const d = this.drag;
+    d.y = e.clientY;
+    this._reposition();
+  }
+
+  _reposition() {
+    const d = this.drag;
+    const row = d.row;
+    let dy = d.y - d.startY;
+    // flyt rækken i DOM'en, når fingeren (rækkens midte) passerer midten af naboen
+    for (let guard = 0; guard < 200; guard++) {
+      const dir = dy > 0 ? 1 : -1;
+      const nb = this._visibleSibling(row, dir);
+      if (!nb || Math.abs(dy) < (nb.offsetHeight + row.offsetHeight) / 2) break;
+      const before = row.offsetTop;
+      if (dir > 0) nb.after(row);
+      else nb.before(row);
+      d.startY += row.offsetTop - before;
+      dy = d.y - d.startY;
+    }
+    row.style.transform = `translateY(${dy}px)`;
+  }
+
+  _autoScroll() {
+    const d = this.drag;
+    if (!d) return;
+    const sc = this.scroller;
+    if (sc) {
+      const r = sc.getBoundingClientRect();
+      const edge = 70;
+      let v = 0;
+      if (d.y < r.top + edge) v = -Math.ceil((r.top + edge - d.y) / 6);
+      else if (d.y > r.bottom - edge) v = Math.ceil((d.y - (r.bottom - edge)) / 6);
+      if (v) {
+        const before = sc.scrollTop;
+        sc.scrollTop += v;
+        const moved = sc.scrollTop - before;
+        if (moved) {
+          d.startY -= moved;
+          this._reposition();
+        }
+      }
+    }
+    d.raf = requestAnimationFrame(() => this._autoScroll());
+  }
+
+  _dragEnd(cancel) {
+    const d = this.drag;
+    if (!d) return;
+    cancelAnimationFrame(d.raf);
+    d.grip.removeEventListener("pointermove", this._onMove);
+    d.grip.removeEventListener("pointerup", this._onUp);
+    d.grip.removeEventListener("pointercancel", this._onUp);
+    d.row.classList.remove("dragging");
+    d.row.style.transform = "";
+    this.el.classList.remove("sorting");
+    this.drag = null;
+    const prevRow = d.row.previousElementSibling;
+    const afterId = prevRow ? prevRow.dataset.id : null;
+    const oldIdx = this.lines.findIndex((l) => l.id === d.id);
+    const oldAfter = oldIdx > 0 ? this.lines[oldIdx - 1].id : null;
+    const pending = this._pending;
+    this._pending = null;
+    if (cancel || afterId === oldAfter || oldIdx < 0) {
+      this.setLines(pending || this.lines);
+      return;
+    }
+    // optimistisk: flyt lokalt, send til HA
+    const lines = [...(pending || this.lines)];
+    const i = lines.findIndex((l) => l.id === d.id);
+    if (i >= 0) {
+      const [ln] = lines.splice(i, 1);
+      const j = afterId ? lines.findIndex((l) => l.id === afterId) + 1 : 0;
+      lines.splice(j, 0, ln);
+    }
+    this.setLines(lines);
+    if (navigator.vibrate) navigator.vibrate(8);
+    this.store.move(d.id, afterId).catch(() => this.setLines(pending || this.lines));
   }
 
   render() {
@@ -208,7 +333,8 @@ export class Checklist {
     if (ln.type === "item") {
       row.innerHTML = `<button class="chk" type="button" role="checkbox" aria-label="Afkryds"></button>` +
         (this.editable
-          ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />`
+          ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />` +
+            `<span class="grip" role="button" aria-label="Træk for at flytte varen" title="Træk for at flytte">${GRIP}</span>`
           : `<span class="tx"></span>`);
     } else if (ln.type === "header") {
       row.innerHTML = this.editable
@@ -325,6 +451,8 @@ export class Checklist {
   }
 }
 
+const GRIP = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 8h16v1.8H4zm0 6.2h16V16H4z"/></svg>`;
+
 /* ------------------------------------------------------------------ madplan-visning */
 export function aftenHTML(mp, { compact = false, weekOpen = false } = {}) {
   if (!mp) return `<p class="dim">Henter madplan …</p>`;
@@ -392,9 +520,26 @@ export function statsHTML(s) {
     <h3>Varer købt pr. uge</h3>
     <div class="sbars" role="img" aria-label="Antal købte varer pr. uge">${bars}</div>
     <h3>Det køber I oftest</h3><ol class="top">${top}</ol>
+    ${turHTML(s)}
     ${s.koebt_denne_uge?.length ? `<h3>Købt i denne uge</h3><p class="tekst">${esc(s.koebt_denne_uge.join(", "))}</p>` : ""}
     ${s.koebt_sidste_uge?.length ? `<h3>Købt i sidste uge</h3><p class="tekst">${esc(s.koebt_sidste_uge.join(", "))}</p>` : ""}
     <p class="dim lille">${s.antal_koeb_i_alt} køb af ${s.antal_varer} forskellige varer${sporet ? " siden " + sporet : ""}.</p>`;
+}
+
+function turHTML(s) {
+  const ture = s.ture || [];
+  if (!ture.length) return "";
+  const fmt = (iso) => new Date(iso).toLocaleDateString("da-DK", { weekday: "short", day: "numeric", month: "short" });
+  const li = ture
+    .slice(0, 6)
+    .map((t) => `<li><span class="tn">${fmt(t.t)}</span><span class="tc">${t.antal} varer</span>
+      <span class="ti">${esc(t.varer.slice(0, 8).join(", "))}${t.varer.length > 8 ? " …" : ""}</span></li>`)
+    .join("");
+  const extra = [
+    s.dage_mellem_ture ? `I handler ind ca. hver ${String(s.dage_mellem_ture).replace(".", ",")}. dag` : "",
+    s.varer_pr_tur ? `${String(s.varer_pr_tur).replace(".", ",")} varer pr. tur` : "",
+  ].filter(Boolean).join(" · ");
+  return `<h3>Seneste indkøb</h3><ol class="top">${li}</ol>${extra ? `<p class="dim lille">${extra}</p>` : ""}`;
 }
 
 export function forslagHTML(stats, openTexts = []) {
@@ -445,6 +590,15 @@ export const BASE_CSS = `
   .ln.done .chk::after { content: ""; position: absolute; left: 7.5px; top: 3px; width: 6px; height: 11px;
          border: solid #fff; border-width: 0 2.2px 2.2px 0; transform: rotate(45deg); }
   .ln.done .tx { color: var(--im-dim); text-decoration: line-through; }
+  .grip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px;
+          margin-right: -10px; color: var(--im-dim); opacity: .45; touch-action: none; cursor: grab;
+          -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .grip:hover { opacity: .9; }
+  .ln.dragging { position: relative; z-index: 3; background: var(--im-bg); border-radius: 10px;
+                 box-shadow: 0 6px 22px rgba(0,0,0,.22); cursor: grabbing; }
+  .ln.dragging .grip { opacity: 1; color: var(--im-acc); cursor: grabbing; }
+  .cl.sorting { -webkit-user-select: none; user-select: none; }
+  .cl.sorting .ln:not(.dragging) { transition: none; }
 
   /* aften */
   .aften-top { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

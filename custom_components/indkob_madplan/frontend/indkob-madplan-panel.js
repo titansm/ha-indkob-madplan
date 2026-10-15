@@ -1,7 +1,7 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
   BASE_CSS, Checklist, aftenHTML, esc, forslagHTML, getStore, lsGet, lsSet, nyUgeSkabelon, relTime, statsHTML,
-} from "./im-common.js";
+} from "./im-common.js?v=0.3.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -94,6 +94,7 @@ class IndkobMadplanPanel extends HTMLElement {
       editable: true,
       hideChecked: this._hideChecked,
       onFocusLine: (id) => (this._focusLine = id),
+      scroller: r.getElementById("ark"),
     });
     r.addEventListener("click", (e) => this._click(e));
     r.getElementById("hurtig").addEventListener("submit", (e) => {
@@ -180,7 +181,7 @@ class IndkobMadplanPanel extends HTMLElement {
         <button class="vk" data-act="mere" aria-haspopup="true" aria-label="Flere handlinger">${ICON_MORE}</button>
         <div class="menu-pop" id="pop" hidden>
           <button data-act="fjern-afkrydsede">Slet afkrydsede varer</button>
-          <button data-act="fjern-flueben">Fjern alle flueben</button>
+          <button data-act="fjern-flueben">Færdig med at handle – fjern alle flueben</button>
         </div>`;
     } else if (open === "madplan") {
       t.innerHTML = `<button class="vk" data-act="ny-uge" title="Indsæt ny uge øverst">Ny uge</button>`;
@@ -191,9 +192,13 @@ class IndkobMadplanPanel extends HTMLElement {
   _renderIndkob() {
     const s = this._state;
     const r = this.shadowRoot;
-    r.getElementById("meta-indkob").textContent = s.indkob.updated
-      ? `Ændret ${relTime(s.indkob.updated)}${s.indkob.updated_by ? " af " + s.indkob.updated_by : ""}`
-      : "";
+    const tur = s.indkob.tur;
+    const kl = (iso) => new Date(iso).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" });
+    r.getElementById("meta-indkob").textContent = tur?.aktiv && tur.nulstilles
+      ? `Handlet ind – fluebenene fjernes ca. kl. ${kl(tur.nulstilles)}`
+      : s.indkob.updated
+        ? `Ændret ${relTime(s.indkob.updated)}${s.indkob.updated_by ? " af " + s.indkob.updated_by : ""}`
+        : "";
     const open = s.indkob.lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text);
     r.getElementById("forslag").innerHTML = forslagHTML(s.stats, open);
   }
@@ -330,11 +335,12 @@ const ICON_MORE = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="
 const PANEL_CSS = `
   :host { display: block; height: 100%; background: var(--primary-background-color, var(--im-bg2)); color: var(--im-text);
           font-family: var(--paper-font-body1_-_font-family, -apple-system, system-ui, Roboto, sans-serif); }
-  .app { display: grid; grid-template-columns: 300px 1fr; height: 100%; }
+  .app { display: grid; grid-template-columns: 300px 1fr; height: 100%; box-sizing: border-box;
+         padding-left: var(--safe-area-content-inset-left, 0px); padding-right: var(--safe-area-content-inset-right, 0px); }
   .liste { border-right: 1px solid var(--im-line); background: var(--im-bg2); overflow-y: auto; }
   .note { display: flex; flex-direction: column; min-width: 0; background: var(--im-bg); height: 100%; }
   .bar { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 0 12px;
-         padding-top: env(safe-area-inset-top, 0); position: sticky; top: 0; z-index: 2; background: inherit; }
+         padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px)); position: sticky; top: 0; z-index: 2; background: inherit; }
   .bar h1 { font-size: 1.25rem; margin: 0; font-weight: 700; }
   .menu, .tilbage { display: inline-flex; align-items: center; color: var(--im-acc); min-height: 44px; min-width: 44px; }
   .tilbage span { font-size: 17px; }
@@ -359,7 +365,7 @@ const PANEL_CSS = `
   .np { font-size: 14px; color: var(--im-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
   .ark { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-  .pane { max-width: 720px; margin: 0 auto; padding: 4px 20px 120px; }
+  .pane { max-width: 720px; margin: 0 auto; padding: 4px 20px calc(120px + var(--safe-area-inset-bottom, 0px)); }
   .titel { font-size: 30px; font-weight: 800; letter-spacing: -.02em; margin: 4px 0 2px; }
   .meta { font-size: 13px; color: var(--im-dim); margin: 0 0 14px; min-height: 1em; }
   .hurtig input { width: 100%; box-sizing: border-box; font: inherit; font-size: 17px; padding: 11px 14px; border-radius: 12px;
@@ -387,7 +393,7 @@ const PANEL_CSS = `
   .app.smal .nr:last-child { border-radius: 0 0 12px 12px; }
   .app.smal .nr.aktiv { background: var(--im-bg); }
   .app:not(.smal) .menu { display: none; }
-  @media (max-width: 600px) { .pane { padding: 4px 16px 120px; } .titel { font-size: 28px; } }
+  @media (max-width: 600px) { .pane { padding: 4px 16px calc(120px + var(--safe-area-inset-bottom, 0px)); } .titel { font-size: 28px; } }
 `;
 
 if (!customElements.get("indkob-madplan-panel")) customElements.define("indkob-madplan-panel", IndkobMadplanPanel);

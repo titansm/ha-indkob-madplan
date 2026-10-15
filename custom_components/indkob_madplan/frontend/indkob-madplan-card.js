@@ -2,7 +2,7 @@
  * type: custom:indkob-madplan-card
  * valgfrit: vis_madplan (true), vis_liste (true), vis_statistik (true), skjul_koebte (true)
  */
-import * as C from "./im-common.js";
+import * as C from "./im-common.js?v=0.3.0";
 
 class IndkobMadplanCard extends HTMLElement {
   constructor() {
