@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.3.2";
+export const VERSION = "0.3.3";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -154,6 +154,21 @@ class ImStore {
   }
   setMadplan(text, base_version) {
     return this.send("madplan/set", { text, base_version });
+  }
+  setSettings(changes) {
+    return this.send("settings/set", changes);
+  }
+  updateTrip(trip_id, betalinger) {
+    return this.send("trip/update", { trip_id, betalinger });
+  }
+  addTrip(dato, betalinger) {
+    return this.send("trip/add", { dato, betalinger });
+  }
+  deleteTrip(trip_id) {
+    return this.send("trip/delete", { trip_id });
+  }
+  clearStats() {
+    return this.send("stats/clear", { bekraeft: true });
   }
 }
 

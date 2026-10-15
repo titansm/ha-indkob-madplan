@@ -2,13 +2,43 @@
 import {
   BASE_CSS, Checklist, aftenHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume, nyUgeSkabelon,
   relTime, scrollerOf, statsHTML,
-} from "./im-common.js?v=0.3.2";
+} from "./im-common.js?v=0.3.3";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
   { id: "madplan", title: "Madplan" },
+  { id: "historik", title: "Indkøbshistorik" },
   { id: "stats", title: "Statistik" },
+  { id: "log", title: "Redigeringslog" },
+  { id: "indstillinger", title: "Indstillinger" },
 ];
+
+const MDR = ["januar", "februar", "marts", "april", "maj", "juni", "juli", "august", "september", "oktober", "november", "december"];
+const kr = (v) => {
+  v = Number(v) || 0;
+  const d = Number.isInteger(v) ? 0 : 2;
+  return v.toLocaleString("da-DK", { minimumFractionDigits: d, maximumFractionDigits: d }) + " kr";
+};
+const parseKr = (t) => {
+  t = String(t || "").replace(/kr\.?/i, "").replace(/\s/g, "");
+  if (/,/.test(t)) t = t.replace(/\./g, "").replace(",", ".");
+  const v = parseFloat(t);
+  return isFinite(v) && v >= 0 ? Math.round(v * 100) / 100 : null;
+};
+const mdNavn = (ym) => { const [y, m] = ym.split("-"); return MDR[+m - 1] + (y == new Date().getFullYear() ? "" : " " + y); };
+const dagTid = (iso) => {
+  const t = new Date(iso).toLocaleString("da-DK", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return t[0].toUpperCase() + t.slice(1);
+};
+const iDag = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+
+/* "1,5 timer", "½ time", "3 timer" */
+const fmtTimer = (h) => {
+  h = Number(h) || 0;
+  if (h === 0.5) return "en halv time";
+  if (h === 1) return "1 time";
+  return String(h).replace(".", ",") + " timer";
+};
 
 class IndkobMadplanPanel extends HTMLElement {
   constructor() {
@@ -93,6 +123,10 @@ class IndkobMadplanPanel extends HTMLElement {
               <div class="forslag" id="forslag"></div>
               <div id="cl"></div>
               <button class="ny-linje" data-act="ny-linje">Ny linje</button>
+              <details class="hjaelp" id="hjaelp">
+                <summary>ⓘ Sådan virker indkøbslisten</summary>
+                <div id="hjaelp-body"></div>
+              </details>
             </section>
             <section id="v-madplan" class="pane">
               <h2 class="titel">Madplan</h2>
@@ -105,9 +139,66 @@ class IndkobMadplanPanel extends HTMLElement {
               <textarea id="mp" spellcheck="true" aria-label="Madplan"
                 placeholder="Uge 42&#10;Onsdag: kylling i karry&#10;Torsdag: tit nat - pita"></textarea>
             </section>
+            <section id="v-historik" class="pane hist">
+              <h2 class="titel">Indkøbshistorik</h2>
+              <p class="meta">Hvornår I har handlet – tryk på et indkøb for at skrive butik og pris.</p>
+              <div id="hist-sum"></div>
+              <button class="ny-tur" data-act="ny-tur">+ Tilføj indkøb uden listen</button>
+              <div id="hist-ny"></div>
+              <div id="hist-liste"></div>
+              <datalist id="butikker"></datalist>
+            </section>
+            <section id="v-log" class="pane logpane">
+              <h2 class="titel">Redigeringslog</h2>
+              <p class="meta">Hvem har ændret hvad – de seneste 150 ændringer.</p>
+              <div id="log-liste"></div>
+            </section>
             <section id="v-stats" class="pane stats">
               <h2 class="titel">Statistik</h2>
               <div id="stats-body"></div>
+            </section>
+            <section id="v-indstillinger" class="pane indst">
+              <h2 class="titel">Indstillinger</h2>
+              <p class="meta">Gælder for hele familien. Ændringer gemmes med det samme.</p>
+
+              <h3 class="gruppe">Handlet ind</h3>
+              <div class="kort">
+                <label class="felt">
+                  <span class="fl">Regn det som handlet ind ved</span>
+                  <span class="fv"><select id="s-taerskel" data-set="handlet_taerskel"></select></span>
+                </label>
+                <label class="felt">
+                  <span class="fl">Fjern fluebenene efter</span>
+                  <span class="fv"><select id="s-timer" data-set="handlet_timer"></select></span>
+                </label>
+              </div>
+              <p class="fod">Når den valgte andel af varerne er krydset af, registreres en indkøbstur. Fluebenene fjernes automatisk, når tiden er gået efter <b>sidste</b> flueben, og turen gemmes i statistikken.</p>
+
+              <h3 class="gruppe">Optøning</h3>
+              <div class="kort">
+                <label class="felt radio"><span class="fl">Retten i dag<small>Påmindelsen gælder dagens aftensmad</small></span>
+                  <input type="radio" name="frost" value="i_dag" data-set="frost_day" /></label>
+                <label class="felt radio"><span class="fl">Retten i morgen<small>Påmindelsen kommer dagen før</small></span>
+                  <input type="radio" name="frost" value="i_morgen" data-set="frost_day" /></label>
+              </div>
+              <p class="fod">Styrer "Tag kød op af fryseren" og ❄-linjen. Notifikationen kl. 10 sendes af en automation i Home Assistant.</p>
+
+              <h3 class="gruppe">Kød-ord</h3>
+              <div class="kort">
+                <label class="felt lodret"><span class="fl">Ekstra ord, der kræver optøning</span>
+                  <input type="text" id="s-ekstra" data-set="extra_koed_ord" placeholder="fx tacos, nasi goreng" autocomplete="off" /></label>
+                <label class="felt lodret"><span class="fl">Ord, der IKKE kræver optøning</span>
+                  <input type="text" id="s-ignorer" data-set="ignorer_ord" placeholder="fx bacon" autocomplete="off" /></label>
+              </div>
+              <details class="fod std"><summary>Standard-ord</summary><p id="s-std"></p></details>
+
+              <h3 class="gruppe">Statistik</h3>
+              <div class="kort">
+                <button class="felt knap fare" data-act="nulstil-stats">Nulstil statistik …</button>
+              </div>
+              <p class="fod">Sletter alle registrerede køb og indkøbsture. Selve listen og madplanen røres ikke.</p>
+
+              <p class="fod version" id="s-version"></p>
             </section>
           </div>
         </main>
@@ -136,6 +227,10 @@ class IndkobMadplanPanel extends HTMLElement {
       this._mpTimer = setTimeout(() => this._flushMadplan(), 800);
     });
     ta.addEventListener("blur", () => this._flushMadplan());
+    r.getElementById("v-indstillinger").addEventListener("change", (e) => this._settingChanged(e));
+    r.getElementById("v-indstillinger").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.matches("input[type=text]")) e.target.blur();
+    });
     this._layout();
   }
 
@@ -152,6 +247,10 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderIndkob();
     this._renderMadplan();
     this.shadowRoot.getElementById("stats-body").innerHTML = statsHTML(s.stats);
+    this._renderHelp();
+    this._renderSettings();
+    this._renderHistorik();
+    this._renderLog();
     if (!this._scrollRestored) {
       this._scrollRestored = true;
       const y = lsGet("scroll_" + (this._open || ""), 0);
@@ -195,6 +294,20 @@ class IndkobMadplanPanel extends HTMLElement {
         const d = (s.madplan.dage || []).find((x) => x.offset === 0);
         return `${relTime(s.madplan.updated)} · ${d?.ret ? "I aften: " + esc(d.ret) : "Intet planlagt i aften"}`;
       }
+      if (id === "historik") {
+        const h = s.historik;
+        const m = h?.maaneder?.[0];
+        if (!h?.ture?.length) return "Ingen indkøb endnu";
+        return `Sidst ${relTime(h.ture[0].t)}` + (m && m.beloeb ? ` · ${mdNavn(m.maaned)}: ${kr(m.beloeb)}` : "");
+      }
+      if (id === "log") {
+        const l = s.log?.[0];
+        return l ? `${relTime(l.t)} · ${esc(l.bruger)} ${esc(l.tekst)}` : "Ingen ændringer endnu";
+      }
+      if (id === "indstillinger") {
+        const i = s.indstillinger;
+        return i ? `Handlet ind ved ${i.handlet_taerskel} % · flueben fjernes efter ${fmtTimer(i.handlet_timer)}` : "";
+      }
       return `${s.stats?.antal_koeb_i_alt || 0} køb registreret`;
     };
     nav.innerHTML = NOTES.map(
@@ -233,6 +346,156 @@ class IndkobMadplanPanel extends HTMLElement {
         : "";
     const open = s.indkob.lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text);
     r.getElementById("forslag").innerHTML = forslagHTML(s.stats, open);
+  }
+
+  /* ------------------------------------------------------------ hjælp */
+  _renderHelp() {
+    const s = this._state;
+    const t = s.indkob.tur || {};
+    const pct = t.taerskel ?? 50;
+    const tim = fmtTimer(t.timer ?? 3);
+    this.shadowRoot.getElementById("hjaelp-body").innerHTML = `
+      <p><b>En fast liste.</b> Varerne bliver stående efter indkøb – det er kun fluebenene, der fjernes. Varer I ikke længere køber, sletter I bare.</p>
+      <p><b>Kryds af, når varen ryger i kurven.</b> Hvert flueben tæller som et køb i statistikken. Fjerner du et flueben igen inden for 12 timer, regnes det som fortrudt.</p>
+      <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
+      <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" fjerner fluebenene med det samme. "Slet afkrydsede varer" fjerner varerne helt fra listen.</p>
+      <p><b>Nye varer</b> skrives i feltet øverst og lander under den overskrift, de plejer at stå under. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
+      <p><b>Overskrifter:</b> Aa gør linjen til overskrift. Enter giver en ny linje, Backspace på en tom linje sletter den.</p>
+      <p><b>Forslag</b> over listen er varer, I plejer at købe, som mangler nu. Tryk for at tilføje.</p>
+      <p><b>Indkøbshistorik:</b> hver indkøbstur gemmes med dato og varer. Tryk på turen for at skrive butik og pris – flere butikker pr. tur går fint. Handler I uden listen, kan I tilføje indkøbet selv.</p>
+      <p><b>Redigeringslog:</b> viser hvem der har tilføjet, rettet, krydset af eller slettet hvad.</p>
+      <p><b>Stemme:</b> Assist og Claude kan tilføje varer, fx "tilføj mælk til indkøbslisten".</p>
+      <p class="dim">Andel og tid ændres under Noter → <button class="link" data-note="indstillinger">Indstillinger</button>.</p>`;
+  }
+
+  /* ------------------------------------------------------------ indkøbshistorik */
+  _renderHistorik(force = false) {
+    const h = this._state?.historik;
+    const r = this.shadowRoot;
+    if (!h) return;
+    // Er man i gang med at skrive en pris, må listen ikke tegnes om under fingrene.
+    const ed = !force && (this._openTrip || r.getElementById("hist-ny").innerHTML || r.activeElement?.closest?.(".tur-edit"));
+    r.getElementById("butikker").innerHTML = (h.butikker || []).map((b) => `<option value="${esc(b.navn)}"></option>`).join("");
+    const md = (h.maaneder || []).slice(0, 6);
+    r.getElementById("hist-sum").innerHTML = md.length ? `<div class="mdr">${md.map((m) => `
+        <div class="md"><span class="mn">${mdNavn(m.maaned)}</span>
+          <span class="mb">${m.beloeb ? kr(m.beloeb) : "–"}</span>
+          <span class="mt">${m.ture} ${m.ture === 1 ? "tur" : "ture"}${m.med_pris < m.ture ? ` · ${m.ture - m.med_pris} uden pris` : ""}</span></div>`).join("")}</div>
+      ${(h.butikker || []).length ? `<p class="fod">Butikker: ${h.butikker.slice(0, 6).map((b) => `${esc(b.navn)} ${b.gange}×`).join(" · ")}</p>` : ""}` : "";
+    if (ed) return;
+    let lastM = "";
+    r.getElementById("hist-liste").innerHTML = (h.ture || []).length
+      ? h.ture.map((t) => {
+          const m = t.t.slice(0, 7);
+          const head = m !== lastM ? `<h3 class="gruppe">${mdNavn(m)}</h3>` : "";
+          lastM = m;
+          const open = this._openTrip === t.id;
+          const butik = t.betalinger.map((b) => esc(b.butik || "ukendt butik")).join(" + ");
+          return `${head}<div class="tur ${open ? "aaben" : ""}" data-tur="${t.id}">
+            <button class="tur-top" data-act="tur" data-id="${t.id}">
+              <span class="tt">${dagTid(t.t)}<small>${t.manuel ? "Tilføjet manuelt" : t.varer.length + (t.varer.length === 1 ? " vare" : " varer") + (t.auto ? "" : " · afsluttet manuelt")}${butik ? " · " + butik : ""}</small></span>
+              <span class="tp ${t.total ? "" : "mangler"}">${t.total ? kr(t.total) : "+ pris"}</span>
+            </button>
+            ${open ? this._turEditHTML(t) : ""}
+          </div>`;
+        }).join("")
+      : `<p class="tom-tekst">Når I handler ind efter listen, dukker indkøbet op her automatisk.</p>`;
+  }
+
+  _betRaekke(b = {}) {
+    return `<div class="bet">
+      <input class="b-butik" list="butikker" placeholder="Butik" value="${esc(b.butik || "")}" autocomplete="off" />
+      <input class="b-beloeb" inputmode="decimal" placeholder="Beløb" value="${b.beloeb ? String(b.beloeb).replace(".", ",") : ""}" autocomplete="off" />
+      <span class="b-kr">kr</span>
+      <button class="b-fjern" data-act="bet-fjern" aria-label="Fjern butik">×</button>
+    </div>`;
+  }
+
+  _turEditHTML(t) {
+    const bet = t.betalinger.length ? t.betalinger : [{}];
+    return `<div class="tur-edit">
+      <div class="bets">${bet.map((b) => this._betRaekke(b)).join("")}</div>
+      <button class="link" data-act="bet-ny">+ Endnu en butik</button>
+      ${t.varer.length ? `<p class="fod">Købt: ${esc(t.varer.join(", "))}</p>` : ""}
+      <div class="tur-knapper">
+        <button class="fare" data-act="tur-slet" data-id="${t.id}">Slet indkøb</button>
+        <button class="gem" data-act="tur-gem" data-id="${t.id}">Gem</button>
+      </div>
+    </div>`;
+  }
+
+  _laesBetalinger(box) {
+    const out = [];
+    let fejl = false;
+    for (const row of box.querySelectorAll(".bet")) {
+      const butik = row.querySelector(".b-butik").value.trim();
+      const raw = row.querySelector(".b-beloeb").value.trim();
+      const beloeb = raw ? parseKr(raw) : 0;
+      row.querySelector(".b-beloeb").classList.toggle("fejl", beloeb === null);
+      if (beloeb === null) fejl = true;
+      if (butik || beloeb) out.push({ butik, beloeb: beloeb || 0 });
+    }
+    return fejl ? null : out;
+  }
+
+  /* ------------------------------------------------------------ redigeringslog */
+  _renderLog() {
+    const log = this._state?.log || [];
+    const el = this.shadowRoot.getElementById("log-liste");
+    let lastDay = "";
+    const dag = (iso) => new Date(iso).toLocaleDateString("da-DK", { weekday: "long", day: "numeric", month: "long" });
+    const NOTE = { indkob: "🛒", madplan: "🍽", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
+    el.innerHTML = log.length
+      ? log.map((l) => {
+          const d = dag(l.t);
+          const head = d !== lastDay ? `<h3 class="gruppe">${d}</h3>` : "";
+          lastDay = d;
+          const kl = new Date(l.t).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" });
+          return `${head}<div class="lg"><span class="lk">${kl}</span><span class="li">${NOTE[l.note] || "•"}</span>
+            <span class="lt"><b>${esc(l.bruger)}</b> ${esc(l.tekst)}</span></div>`;
+        }).join("")
+      : `<p class="tom-tekst">Ændringer fra nu af vises her.</p>`;
+  }
+
+  /* ------------------------------------------------------------ indstillinger */
+  _renderSettings() {
+    const i = this._state?.indstillinger;
+    if (!i) return;
+    const r = this.shadowRoot;
+    const focus = r.activeElement;
+    const fill = (sel, values, cur, label) => {
+      if (focus === sel) return;
+      const vals = values.includes(cur) ? values : [...values, cur].sort((a, b) => a - b);
+      sel.innerHTML = vals.map((v) => `<option value="${v}" ${v === cur ? "selected" : ""}>${label(v)}</option>`).join("");
+    };
+    fill(r.getElementById("s-taerskel"), [25, 30, 40, 50, 60, 70, 75, 80, 90, 100], i.handlet_taerskel, (v) => `${v} % afkrydset`);
+    fill(r.getElementById("s-timer"), [0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 12, 24], i.handlet_timer, fmtTimer);
+    for (const rb of r.querySelectorAll("input[name=frost]")) rb.checked = rb.value === i.frost_day;
+    for (const [id, key] of [["s-ekstra", "extra_koed_ord"], ["s-ignorer", "ignorer_ord"]]) {
+      const el = r.getElementById(id);
+      if (focus !== el && el.value !== i[key]) el.value = i[key];
+    }
+    r.getElementById("s-std").textContent = i.standard_koed_ord.join(", ") +
+      `. Retter med "${i.rest_ord.join('", "')}" kræver aldrig optøning; "fra fryser" gør altid.`;
+    r.getElementById("s-version").textContent = `Indkøb & Madplan ${i.version}`;
+  }
+
+  async _settingChanged(e) {
+    const el = e.target.closest("[data-set]");
+    if (!el) return;
+    const key = el.dataset.set;
+    let v = el.value;
+    if (key === "handlet_taerskel") v = parseInt(v, 10);
+    if (key === "handlet_timer") v = parseFloat(v);
+    if (el.type === "text") v = v.split(",").map((x) => x.trim()).filter(Boolean).join(", ");
+    this._setStatus("Gemmer …");
+    try {
+      await this._store.setSettings({ [key]: v });
+      this._setStatus("Gemt");
+    } catch (err) {
+      this._setStatus("Kunne ikke gemme");
+      this._renderSettings();
+    }
   }
 
   /* ------------------------------------------------------------ madplan */
@@ -287,7 +550,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const el = this.shadowRoot.getElementById("status");
     el.textContent = t;
     clearTimeout(this._statusTimer);
-    if (t === "Gemt") this._statusTimer = setTimeout(() => (el.textContent = ""), 1500);
+    if (t !== "Gemmer …") this._statusTimer = setTimeout(() => (el.textContent = ""), 1500);
   }
 
   /* ------------------------------------------------------------ klik */
@@ -357,6 +620,65 @@ class IndkobMadplanPanel extends HTMLElement {
       ta.focus();
       const pos = tpl.indexOf(": ") + 2;
       ta.setSelectionRange(pos, pos);
+    } else if (act === "tur") {
+      this._openTrip = this._openTrip === b.dataset.id ? null : b.dataset.id;
+      this._renderHistorik(true);
+    } else if (act === "bet-ny") {
+      b.previousElementSibling.insertAdjacentHTML("beforeend", this._betRaekke());
+      b.previousElementSibling.lastElementChild.querySelector(".b-butik").focus();
+    } else if (act === "bet-fjern") {
+      const bets = b.closest(".bets");
+      b.closest(".bet").remove();
+      if (!bets.children.length) bets.insertAdjacentHTML("beforeend", this._betRaekke());
+    } else if (act === "tur-gem") {
+      const box = b.closest(".tur-edit");
+      const bet = this._laesBetalinger(box);
+      if (!bet) return this._setStatus("Tjek beløbet");
+      try {
+        await this._store.updateTrip(b.dataset.id, bet);
+        this._openTrip = null;
+        r.activeElement?.blur?.();
+        this._setStatus("Gemt");
+        this._renderHistorik(true);
+      } catch (err) {
+        this._setStatus("Kunne ikke gemme");
+      }
+    } else if (act === "tur-slet") {
+      if (!confirm("Slet dette indkøb fra historikken?")) return;
+      this._openTrip = null;
+      await this._store.deleteTrip(b.dataset.id).catch(() => this._setStatus("Kunne ikke slette"));
+      this._renderHistorik(true);
+    } else if (act === "ny-tur") {
+      const ny = r.getElementById("hist-ny");
+      if (ny.innerHTML) { ny.innerHTML = ""; this._renderHistorik(true); return; }
+      ny.innerHTML = `<div class="tur aaben"><div class="tur-edit">
+        <label class="dato">Dato <input type="date" id="ny-dato" value="${iDag()}" max="${iDag()}" /></label>
+        <div class="bets">${this._betRaekke()}</div>
+        <button class="link" data-act="bet-ny">+ Endnu en butik</button>
+        <div class="tur-knapper"><button data-act="ny-tur">Annullér</button><button class="gem" data-act="ny-tur-gem">Tilføj</button></div>
+      </div></div>`;
+      ny.querySelector(".b-butik").focus();
+    } else if (act === "ny-tur-gem") {
+      const ny = r.getElementById("hist-ny");
+      const bet = this._laesBetalinger(ny);
+      const dato = r.getElementById("ny-dato").value;
+      if (!bet || !dato) return this._setStatus(!dato ? "Vælg en dato" : "Tjek beløbet");
+      try {
+        await this._store.addTrip(dato, bet);
+        ny.innerHTML = "";
+        this._setStatus("Tilføjet");
+        this._renderHistorik(true);
+      } catch (err) {
+        this._setStatus("Kunne ikke tilføje");
+      }
+    } else if (act === "nulstil-stats") {
+      if (!confirm("Nulstil statistikken?\n\nAlle registrerede køb og indkøbsture slettes. Det kan ikke fortrydes.")) return;
+      try {
+        await this._store.clearStats();
+        this._setStatus("Statistik nulstillet");
+      } catch (err) {
+        this._setStatus("Kunne ikke nulstille");
+      }
     } else if (act === "hent-nyeste") {
       this._mpDirty = false;
       this._renderMadplan();
@@ -417,6 +739,64 @@ const PANEL_CSS = `
   .konflikt { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 10px;
               border-radius: 10px; background: color-mix(in srgb, var(--im-acc-strong) 18%, transparent); }
   .pad { padding: 24px; }
+
+  .hjaelp { margin-top: 28px; padding: 12px 16px; background: var(--im-bg2); border-radius: 14px; font-size: 15px; line-height: 1.45; }
+  .hjaelp summary { cursor: pointer; font-weight: 600; color: var(--im-acc); list-style: none; min-height: 28px; display: flex; align-items: center; }
+  .hjaelp summary::-webkit-details-marker { display: none; }
+  .hjaelp p { margin: 10px 0 0; }
+  .hjaelp .dim { color: var(--im-dim); }
+  .link { color: var(--im-acc); font: inherit; padding: 0; }
+
+  .hist .gruppe, .logpane .gruppe, .indst .gruppe { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--im-dim); margin: 22px 4px 6px; }
+  .indst .kort { background: var(--im-bg2); border-radius: 12px; overflow: hidden; }
+  .indst .felt { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; min-height: 28px; font-size: 17px; }
+  .indst .felt + .felt { border-top: 1px solid var(--im-line); }
+  .indst .felt.lodret { flex-direction: column; align-items: stretch; gap: 6px; }
+  .indst .fl { display: flex; flex-direction: column; }
+  .indst .fl small { font-size: 13px; color: var(--im-dim); margin-top: 2px; }
+  .indst select { font: inherit; font-size: 16px; color: var(--im-acc); background: transparent; border: 0; text-align: right; padding: 4px 0; max-width: 55vw; }
+  .indst input[type=text] { font: inherit; font-size: 16px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--im-line);
+                            background: var(--im-bg); color: var(--im-text); width: 100%; box-sizing: border-box; }
+  .indst input[type=radio] { width: 22px; height: 22px; accent-color: var(--im-acc); flex: none; }
+  .indst .knap { width: 100%; text-align: left; font: inherit; font-size: 17px; }
+  .indst .fare { color: var(--error-color, #d93025); }
+  .hist .fod, .indst .fod { font-size: 13px; color: var(--im-dim); margin: 6px 4px 0; line-height: 1.4; }
+  .indst .std summary { cursor: pointer; color: var(--im-acc); }
+  .mdr { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .md { flex: none; min-width: 112px; background: var(--im-bg2); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .md:first-child { background: color-mix(in srgb, var(--im-acc-strong) 22%, var(--im-bg2)); }
+  .mn { font-size: 13px; color: var(--im-dim); text-transform: capitalize; }
+  .mb { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mt { font-size: 12px; color: var(--im-dim); }
+  .ny-tur { color: var(--im-acc); font-weight: 600; padding: 14px 0 4px; font-size: 16px; }
+  .tur { background: var(--im-bg2); border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
+  .tur-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; padding: 11px 14px; font: inherit; }
+  .tt { display: flex; flex-direction: column; font-size: 16px; }
+  .tt small { font-size: 13px; color: var(--im-dim); margin-top: 2px; }
+  .tp { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tp.mangler { color: var(--im-acc); font-weight: 600; }
+  .tur-edit { padding: 4px 14px 12px; border-top: 1px solid var(--im-line); }
+  .bets { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; }
+  .bet { display: grid; grid-template-columns: 1fr 96px auto 36px; gap: 6px; align-items: center; }
+  .bet input, .dato input { font: inherit; font-size: 16px; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--im-line);
+                            background: var(--im-bg); color: var(--im-text); min-width: 0; box-sizing: border-box; }
+  .b-beloeb { text-align: right; font-variant-numeric: tabular-nums; }
+  .bet input.fejl { border-color: var(--error-color, #d93025); }
+  .b-kr { color: var(--im-dim); font-size: 14px; }
+  .b-fjern { font-size: 22px; color: var(--im-dim); min-height: 40px; }
+  .dato { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 10px; font-size: 16px; }
+  .tur-edit .link { padding: 10px 0 2px; font-size: 15px; font-weight: 600; }
+  .tur-knapper { display: flex; justify-content: space-between; margin-top: 12px; }
+  .tur-knapper button { font: inherit; font-size: 16px; padding: 8px 4px; min-height: 40px; color: var(--im-acc); }
+  .tur-knapper .gem { font-weight: 700; padding: 8px 18px; border-radius: 10px; background: var(--im-acc); color: #fff; }
+  .tur-knapper .fare { color: var(--error-color, #d93025); }
+  .tom-tekst { color: var(--im-dim); }
+  .lg { display: grid; grid-template-columns: 46px 22px 1fr; gap: 6px; padding: 7px 0; border-bottom: 1px solid var(--im-line); font-size: 15px; line-height: 1.35; }
+  .lk { color: var(--im-dim); font-variant-numeric: tabular-nums; }
+  .li { text-align: center; }
+  .lt { overflow-wrap: anywhere; }
+  .logpane .gruppe { text-transform: none; }
+  .indst .version { margin-top: 28px; text-align: center; }
 
   /* smal skærm: én kolonne, noteliste eller note */
   .app.smal { grid-template-columns: 1fr; }
