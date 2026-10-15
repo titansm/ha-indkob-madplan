@@ -1,8 +1,9 @@
 /* Indkøb & Madplan – dashboard-kort
  * type: custom:indkob-madplan-card
- * valgfrit: vis_madplan (true), vis_liste (true), vis_statistik (true), skjul_koebte (true)
+ * valgfrit: vis_madplan (true), vis_liste (true), vis_statistik (true), skjul_koebte (true),
+ *           kun_i_dag (false) – vis kun dagens ret; tryk på kortet åbner noterne
  */
-import * as C from "./im-common.js?v=0.3.0";
+import * as C from "./im-common.js?v=0.3.1";
 
 class IndkobMadplanCard extends HTMLElement {
   constructor() {
@@ -14,17 +15,17 @@ class IndkobMadplanCard extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = { vis_madplan: true, vis_liste: true, vis_statistik: true, skjul_koebte: true, ...config };
+    this._config = { vis_madplan: true, vis_liste: true, vis_statistik: true, skjul_koebte: true, kun_i_dag: false, ...config };
     if (this._built) this._renderAll();
   }
   static getStubConfig() {
     return {};
   }
   getCardSize() {
-    return 8;
+    return this._config?.kun_i_dag ? 2 : 8;
   }
   getGridOptions() {
-    return { columns: 12, min_columns: 6, rows: "auto" };
+    return this._config?.kun_i_dag ? { columns: 12, min_columns: 3, rows: "auto" } : { columns: 12, min_columns: 6, rows: "auto" };
   }
 
   set hass(hass) {
@@ -83,6 +84,12 @@ class IndkobMadplanCard extends HTMLElement {
       this._store?.add(v, { auto_place: true, line_type: "item" }).catch(() => {});
     });
     r.addEventListener("click", (e) => this._click(e));
+    r.getElementById("aften").addEventListener("keydown", (e) => {
+      if (this._config.kun_i_dag && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        this._openPanel();
+      }
+    });
     this._renderAll();
   }
 
@@ -95,6 +102,23 @@ class IndkobMadplanCard extends HTMLElement {
       r.getElementById("aften").innerHTML = `<p class="fejl">${C.esc(this._store.error)}</p>`;
       return;
     }
+    const kun = !!c.kun_i_dag;
+    this.toggleAttribute("kun", kun);
+    if (kun) {
+      const a = r.getElementById("aften");
+      a.hidden = false;
+      a.setAttribute("role", "link");
+      a.setAttribute("tabindex", "0");
+      a.setAttribute("aria-label", "Åbn Indkøb & Madplan");
+      r.getElementById("faner").hidden = true;
+      r.getElementById("liste").hidden = true;
+      r.getElementById("stats").hidden = true;
+      if (s) a.innerHTML = C.aftenHTML(s.madplan, { onlyToday: true });
+      return;
+    }
+    r.getElementById("faner").hidden = false;
+    r.getElementById("aften").removeAttribute("role");
+    r.getElementById("aften").removeAttribute("tabindex");
     if (!c.vis_liste) this._tab = "statistik";
     if (!c.vis_statistik) this._tab = "liste";
     r.getElementById("aften").hidden = !c.vis_madplan;
@@ -117,7 +141,16 @@ class IndkobMadplanCard extends HTMLElement {
     if (this._tab === "statistik") r.getElementById("stats").innerHTML = C.statsHTML(s.stats);
   }
 
+  _openPanel() {
+    history.pushState(null, "", C.PANEL_PATH);
+    window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } }));
+  }
+
   _click(e) {
+    if (this._config.kun_i_dag && e.target.closest("#aften")) {
+      this._openPanel();
+      return;
+    }
     const tab = e.target.closest("[data-tab]");
     if (tab) {
       this._tab = tab.dataset.tab;
@@ -129,8 +162,7 @@ class IndkobMadplanCard extends HTMLElement {
     const act = b.dataset.act;
     if (act === "aaben") {
       e.preventDefault();
-      history.pushState(null, "", C.PANEL_PATH);
-      window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } }));
+      this._openPanel();
     } else if (act === "uge") {
       this._weekOpen = !this._weekOpen;
       this._renderAll();
@@ -165,6 +197,9 @@ const CARD_CSS = `
   #cl[data-empty]::before { content: "Alt er købt. Tilføj en vare ovenfor."; color: var(--im-dim); padding: 12px 0; }
   .kurv { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-top: 6px; }
   .kurv:empty { display: none; }
+  :host([kun]) .aften { border-bottom: 0; padding: 16px 18px; cursor: pointer; }
+  :host([kun]) .aften .ret { font-size: clamp(1.5rem, 5vw, 2.1rem); margin-bottom: 0; }
+  :host([kun]) .aften .frost { margin-top: 10px; }
 `;
 
 if (!customElements.get("indkob-madplan-card")) {

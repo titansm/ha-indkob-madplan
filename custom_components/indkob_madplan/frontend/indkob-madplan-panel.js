@@ -1,7 +1,7 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
   BASE_CSS, Checklist, aftenHTML, esc, forslagHTML, getStore, lsGet, lsSet, nyUgeSkabelon, relTime, statsHTML,
-} from "./im-common.js?v=0.3.0";
+} from "./im-common.js?v=0.3.1";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },

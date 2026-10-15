@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -454,7 +454,7 @@ export class Checklist {
 const GRIP = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 8h16v1.8H4zm0 6.2h16V16H4z"/></svg>`;
 
 /* ------------------------------------------------------------------ madplan-visning */
-export function aftenHTML(mp, { compact = false, weekOpen = false } = {}) {
+export function aftenHTML(mp, { compact = false, weekOpen = false, onlyToday = false } = {}) {
   if (!mp) return `<p class="dim">Henter madplan …</p>`;
   const dage = mp.dage || [];
   const idag = dage.find((d) => d.offset === 0);
@@ -480,9 +480,9 @@ export function aftenHTML(mp, { compact = false, weekOpen = false } = {}) {
   return `
     <div class="aften-top"><span class="hvornaar">I aften</span>${noter}</div>
     <div class="ret ${ret ? "" : "tom"}">${ret ? esc(ret) : "Ingen ret på madplanen"}</div>
-    ${imorgen?.ret ? `<p class="imorgen">I morgen: <strong>${esc(imorgen.ret)}</strong></p>` : ""}
-    ${frost}
-    ${compact ? "" : `<button class="link ugeknap" data-act="uge" aria-expanded="${weekOpen}">${weekOpen ? "Skjul ugen" : "Vis hele ugen"}</button>
+    ${imorgen?.ret && !onlyToday ? `<p class="imorgen">I morgen: <strong>${esc(imorgen.ret)}</strong></p>` : ""}
+    ${onlyToday && mp.frost_dag === "i morgen" ? "" : frost}
+    ${compact || onlyToday ? "" : `<button class="link ugeknap" data-act="uge" aria-expanded="${weekOpen}">${weekOpen ? "Skjul ugen" : "Vis hele ugen"}</button>
     <ol class="uge" ${weekOpen ? "" : "hidden"}>${uge}</ol>`}`;
 }
 
