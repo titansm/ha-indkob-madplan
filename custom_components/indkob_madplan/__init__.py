@@ -20,7 +20,14 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CARD_FILE,
+    CONF_EXTRA_KOED,
+    CONF_FROST_DAY,
+    CONF_IGNORE_KOED,
+    CONF_TRIP_DELAY,
+    CONF_TRIP_THRESHOLD,
     DOMAIN,
+    FROST_TODAY,
+    FROST_TOMORROW,
     NOTE_INDKOB,
     NOTE_MADPLAN,
     PANEL_ELEMENT,
@@ -50,7 +57,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     add_extra_js_url(hass, f"{URL_BASE}/{CARD_FILE}?v={VERSION}")
     for cmd in (
         ws_subscribe, ws_state, ws_add, ws_update, ws_delete, ws_move,
-        ws_clear_checked, ws_uncheck_all, ws_madplan_set,
+        ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_settings_set, ws_stats_clear,
+        ws_trip_update, ws_trip_add, ws_trip_delete,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -74,7 +82,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IndkobConfigEntry) -> bo
         # Panelet tegner selv under statuslinjen (iOS); ellers lægger HA en tom bjælke ovenover.
         handle_safe_area=True,
     )
-    entry.async_on_unload(entry.add_update_listener(_async_reload))
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
 
@@ -86,8 +94,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: IndkobConfigEntry) -> b
     return ok
 
 
-async def _async_reload(hass: HomeAssistant, entry: IndkobConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+async def _async_options_updated(hass: HomeAssistant, entry: IndkobConfigEntry) -> None:
+    # Alle indstillinger læses live – ingen genindlæsning (så panelet ikke forsvinder imens).
+    entry.runtime_data.options_changed()
 
 
 def _manager(hass: HomeAssistant) -> IndkobMadplanManager:
@@ -174,21 +183,17 @@ def ws_indkob__add(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict
     vol.Optional("line_type"): vol.In(LINE_TYPES),
 })
 def ws_indkob__update(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    line = m.indkob.update(msg["line_id"], text=msg.get("text"), checked=msg.get("checked"), line_type=msg.get("line_type"))
-    m.indkob_changed(user)
-    return line
+    return m.update_line(msg["line_id"], user, text=msg.get("text"), checked=msg.get("checked"), line_type=msg.get("line_type"))
 
 
 @_ws({vol.Required("line_ids"): [str]})
 def ws_indkob__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
-    m.indkob.delete(msg["line_ids"])
-    m.indkob_changed(user)
+    m.delete_lines(msg["line_ids"], user)
 
 
 @_ws({vol.Required("line_id"): str, vol.Optional("after_id"): vol.Any(str, None)})
 def ws_indkob__move(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
-    m.indkob.move(msg["line_id"], msg.get("after_id"))
-    m.indkob_changed(user)
+    m.move_line(msg["line_id"], msg.get("after_id"), user)
 
 
 @_ws({})
@@ -207,9 +212,48 @@ def ws_madplan__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dic
     return {"version": m.madplan_note.version}
 
 
+@_ws({
+    vol.Optional(CONF_FROST_DAY): vol.In([FROST_TODAY, FROST_TOMORROW]),
+    vol.Optional(CONF_EXTRA_KOED): vol.All(str, vol.Length(max=1000)),
+    vol.Optional(CONF_IGNORE_KOED): vol.All(str, vol.Length(max=1000)),
+    vol.Optional(CONF_TRIP_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=10, max=100)),
+    vol.Optional(CONF_TRIP_DELAY): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=24)),
+})
+def ws_settings__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.set_settings({k: v for k, v in msg.items() if k not in ("id", "type")}, user)
+
+
+@_ws({vol.Required("bekraeft"): True})
+def ws_stats__clear(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
+    m.clear_history(user)
+
+
+PAYMENTS = vol.All([{
+    vol.Optional("butik", default=""): vol.All(str, vol.Length(max=60)),
+    vol.Optional("beloeb", default=0): vol.All(vol.Coerce(float), vol.Range(min=0, max=100000)),
+}], vol.Length(max=10))
+
+
+@_ws({vol.Required("trip_id"): str, vol.Required("betalinger"): PAYMENTS})
+def ws_trip__update(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.update_trip(msg["trip_id"], msg["betalinger"], user)
+
+
+@_ws({vol.Required("dato"): cv.date, vol.Optional("betalinger", default=list): PAYMENTS})
+def ws_trip__add(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.add_manual_trip(msg["dato"], msg["betalinger"], user)
+
+
+@_ws({vol.Required("trip_id"): str})
+def ws_trip__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
+    m.delete_trip(msg["trip_id"], user)
+
+
 # Navnene på handlerne bestemmer websocket-typen: ws_indkob__add -> indkob_madplan/indkob/add
 ws_add, ws_update, ws_delete, ws_move = ws_indkob__add, ws_indkob__update, ws_indkob__delete, ws_indkob__move
 ws_clear_checked, ws_uncheck_all, ws_madplan_set = ws_indkob__clear_checked, ws_indkob__uncheck_all, ws_madplan__set
+ws_settings_set, ws_stats_clear = ws_settings__set, ws_stats__clear
+ws_trip_update, ws_trip_add, ws_trip_delete = ws_trip__update, ws_trip__add, ws_trip__delete
 
 
 # ---------------------------------------------------------------- services

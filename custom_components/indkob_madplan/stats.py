@@ -5,7 +5,9 @@ Ren Python uden Home Assistant-afhængigheder.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from statistics import median
@@ -63,8 +65,12 @@ class History:
         self.snapshot: dict[str, dict] | None = data.get("snapshot")
         self.names: dict[str, str] = data.get("names", {})
         self.madplan_text: str = data.get("madplan_text", "")
-        # Indkøbsture: {"t": iso, "varer": [navne], "auto": bool}
+        # Indkøbsture: {"id", "t": iso, "varer": [navne], "auto": bool,
+        #               "betalinger": [{"butik": str, "beloeb": float}], "manuel": bool}
         self.trips: list[dict] = data.get("trips", [])
+        for tr in self.trips:  # ældre ture (≤ 0.3.2) havde intet id
+            tr.setdefault("id", hashlib.sha1(tr["t"].encode()).hexdigest()[:10])
+            tr.setdefault("betalinger", [])
 
     MAX_TRIPS = 300
 
@@ -89,10 +95,54 @@ class History:
 
     def add_trip(self, t: datetime, summaries: list[str], auto: bool) -> dict:
         varer = [_clean_display(s) or s for s in summaries if not is_header(s)]
-        trip = {"t": t.isoformat(timespec="seconds"), "varer": varer, "auto": auto}
+        trip = {"id": uuid.uuid4().hex[:10], "t": t.isoformat(timespec="seconds"), "varer": varer,
+                "auto": auto, "betalinger": []}
         self.trips.append(trip)
+        self.trips.sort(key=lambda x: x["t"])
         del self.trips[: max(0, len(self.trips) - self.MAX_TRIPS)]
         return trip
+
+    def get_trip(self, trip_id: str) -> dict:
+        for tr in self.trips:
+            if tr["id"] == trip_id:
+                return tr
+        raise KeyError(trip_id)
+
+    def delete_trip(self, trip_id: str) -> dict:
+        tr = self.get_trip(trip_id)
+        self.trips.remove(tr)
+        return tr
+
+    def trip_overview(self, now: datetime, limit: int = 100) -> dict:
+        """Indkøbshistorik med priser: seneste ture, måneds- og butikstotaler."""
+        trips = sorted(self.trips, key=lambda x: x["t"])
+        months: dict[str, dict] = {}
+        shops: dict[str, dict] = {}
+        for tr in trips:
+            total = round(sum(b["beloeb"] for b in tr.get("betalinger", [])), 2)
+            m = months.setdefault(tr["t"][:7], {"maaned": tr["t"][:7], "beloeb": 0.0, "ture": 0, "med_pris": 0})
+            m["ture"] += 1
+            if tr.get("betalinger"):
+                m["med_pris"] += 1
+                m["beloeb"] = round(m["beloeb"] + total, 2)
+            for b in tr.get("betalinger", []):
+                navn = (b.get("butik") or "").strip()
+                if not navn:
+                    continue
+                sh = shops.setdefault(navn.lower(), {"navn": navn, "beloeb": 0.0, "gange": 0, "sidst": tr["t"]})
+                sh["beloeb"] = round(sh["beloeb"] + b["beloeb"], 2)
+                sh["gange"] += 1
+                sh["sidst"] = max(sh["sidst"], tr["t"])
+        ture = [
+            {**tr, "total": round(sum(b["beloeb"] for b in tr.get("betalinger", [])), 2)}
+            for tr in reversed(trips[-limit:])
+        ]
+        return {
+            "ture": ture,
+            "antal_ture": len(trips),
+            "maaneder": [months[k] for k in sorted(months, reverse=True)][:13],
+            "butikker": sorted(shops.values(), key=lambda x: (-x["gange"], x["navn"])),
+        }
 
     # ------------------------------------------------------------------ diff
     def apply_items(self, items: list[dict], now: datetime) -> list[dict]:

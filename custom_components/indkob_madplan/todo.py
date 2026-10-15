@@ -47,16 +47,17 @@ class IndkobTodo(IndkobEntity, TodoListEntity):
         line = self.manager.indkob.add(item.summary or "", line_type=TYPE_ITEM, auto_place=True)
         if item.status == TodoItemStatus.COMPLETED:
             line["checked"] = True
+        if (item.summary or "").strip():
+            self.manager._log("Home Assistant", "indkob", f'tilføjede "{item.summary.strip()}"')
         self.manager.indkob_changed("Home Assistant")
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
-        self.manager.indkob.update(
+        self.manager.update_line(
             item.uid,
+            "Home Assistant",
             text=item.summary,
             checked=None if item.status is None else item.status == TodoItemStatus.COMPLETED,
         )
-        self.manager.indkob_changed("Home Assistant")
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
-        self.manager.indkob.delete(uids)
-        self.manager.indkob_changed("Home Assistant")
+        self.manager.delete_lines(uids, "Home Assistant")
