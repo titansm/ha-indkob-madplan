@@ -63,6 +63,10 @@ class History:
         self.snapshot: dict[str, dict] | None = data.get("snapshot")
         self.names: dict[str, str] = data.get("names", {})
         self.madplan_text: str = data.get("madplan_text", "")
+        # Indkøbsture: {"t": iso, "varer": [navne], "auto": bool}
+        self.trips: list[dict] = data.get("trips", [])
+
+    MAX_TRIPS = 300
 
     def as_dict(self) -> dict:
         return {
@@ -70,7 +74,25 @@ class History:
             "snapshot": self.snapshot,
             "names": self.names,
             "madplan_text": self.madplan_text,
+            "trips": self.trips,
         }
+
+    # ------------------------------------------------------------ ture
+    def set_baseline(self, items: list[dict]) -> None:
+        """Ny grundlinje uden hændelser (bruges når fluebenene nulstilles efter en tur).
+
+        Køb er allerede logget ved afkrydsning; at fjerne fluebenene må hverken
+        fortryde køb eller tælle som nye tilføjelser.
+        """
+        self.snapshot = None
+        self.apply_items(items, datetime.now())
+
+    def add_trip(self, t: datetime, summaries: list[str], auto: bool) -> dict:
+        varer = [_clean_display(s) or s for s in summaries if not is_header(s)]
+        trip = {"t": t.isoformat(timespec="seconds"), "varer": varer, "auto": auto}
+        self.trips.append(trip)
+        del self.trips[: max(0, len(self.trips) - self.MAX_TRIPS)]
+        return trip
 
     # ------------------------------------------------------------------ diff
     def apply_items(self, items: list[dict], now: datetime) -> list[dict]:
@@ -196,6 +218,21 @@ class History:
             if buys
             else None,
             "forslag": self.suggestions(items, now),
+            **self._trip_stats(now),
+        }
+
+    def _trip_stats(self, now: datetime) -> dict:
+        trips = sorted(self.trips, key=lambda x: x["t"])
+        recent = [x for x in trips if now - datetime.fromisoformat(x["t"]) <= timedelta(weeks=12)]
+        days = sorted({datetime.fromisoformat(x["t"]).date() for x in trips})
+        gaps = [(b - a).days for a, b in zip(days, days[1:])]
+        return {
+            "ture": [{"t": x["t"], "antal": len(x["varer"]), "varer": x["varer"], "auto": x.get("auto", False)} for x in reversed(trips[-10:])],
+            "antal_ture": len(trips),
+            "ture_12u": len(recent),
+            "varer_pr_tur": round(sum(len(x["varer"]) for x in recent) / len(recent), 1) if recent else None,
+            "dage_mellem_ture": round(median(gaps), 1) if gaps else None,
+            "seneste_tur": trips[-1]["t"] if trips else None,
         }
 
     def suggestions(self, items: list[dict], now: datetime, limit: int = 8) -> list[dict]:

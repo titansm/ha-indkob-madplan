@@ -10,7 +10,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -18,6 +18,11 @@ from .const import (
     CONF_EXTRA_KOED,
     CONF_FROST_DAY,
     CONF_IGNORE_KOED,
+    CONF_TRIP_DELAY,
+    CONF_TRIP_THRESHOLD,
+    DEFAULT_TRIP_DELAY,
+    DEFAULT_TRIP_THRESHOLD,
+    EVENT_HANDLET_IND,
     FROST_TOMORROW,
     NOTE_INDKOB,
     NOTE_MADPLAN,
@@ -52,6 +57,10 @@ class IndkobMadplanManager:
         self.stats: dict[str, Any] = {}
         self._unsubs: list[CALLBACK_TYPE] = []
         self._listeners: set[Callable[[], None]] = set()
+        # Indkøbstur: sat når min. X % af varerne er krydset af.
+        # {"start": iso, "sidste_flueben": iso}
+        self.trip: dict[str, str] | None = None
+        self._checked_count = 0
 
     # ------------------------------------------------------------ options
     @property
@@ -61,6 +70,14 @@ class IndkobMadplanManager:
     @property
     def frost_tomorrow(self) -> bool:
         return self.opts.get(CONF_FROST_DAY) == FROST_TOMORROW
+
+    @property
+    def trip_threshold(self) -> float:
+        return float(self.opts.get(CONF_TRIP_THRESHOLD, DEFAULT_TRIP_THRESHOLD)) / 100
+
+    @property
+    def trip_delay(self) -> timedelta:
+        return timedelta(hours=float(self.opts.get(CONF_TRIP_DELAY, DEFAULT_TRIP_DELAY)))
 
     @property
     def koed_ord(self) -> list[str]:
@@ -74,12 +91,18 @@ class IndkobMadplanManager:
         self.indkob = ShoppingNote(data.get(NOTE_INDKOB))
         self.madplan_note = TextNote(data.get(NOTE_MADPLAN))
         self.history = History(data.get("history"))
+        self.trip = data.get("trip")
+        self._checked_count = self._count()[1]
         self._unsubs.append(
             async_track_time_change(self.hass, self._on_midnight, hour=0, minute=0, second=5)
+        )
+        self._unsubs.append(
+            async_track_time_interval(self.hass, self._on_tick, timedelta(minutes=5))
         )
         self._parse_madplan()
         self._feed_history()
         self.stats = self.history.compute(dt_util.now())
+        self._on_tick(dt_util.now())
 
     async def async_stop(self) -> None:
         for unsub in self._unsubs:
@@ -92,6 +115,7 @@ class IndkobMadplanManager:
             NOTE_INDKOB: self.indkob.as_dict(),
             NOTE_MADPLAN: self.madplan_note.as_dict(),
             "history": self.history.as_dict(),
+            "trip": self.trip,
         }
 
     def _save(self) -> None:
@@ -124,12 +148,14 @@ class IndkobMadplanManager:
                 _LOGGER.exception("Fejl i lytter")
 
     # ------------------------------------------------------------ indkøbsliste
-    def _feed_history(self) -> None:
-        items = [
+    def _history_items(self) -> list[dict]:
+        return [
             {"uid": ln["id"], "summary": ln["text"], "status": "completed" if ln["checked"] else "needs_action"}
             for ln in self.indkob.items()
         ]
-        new = self.history.apply_items(items, dt_util.now())
+
+    def _feed_history(self) -> None:
+        new = self.history.apply_items(self._history_items(), dt_util.now())
         if new:
             _LOGGER.debug("Indkøbshændelser: %s", new)
 
@@ -142,9 +168,76 @@ class IndkobMadplanManager:
         n.updated_by = user
         n.learn_categories()
         self._feed_history()
+        self._track_trip()
         self.stats = self.history.compute(dt_util.now())
         self._save()
         self._notify()
+
+    # ------------------------------------------------------------ indkøbstur
+    def _count(self) -> tuple[int, int]:
+        items = self.indkob.items()
+        return len(items), sum(1 for ln in items if ln["checked"])
+
+    def _track_trip(self) -> None:
+        """Registrér at der handles ind, når min. tærsklen af varerne er krydset af."""
+        total, checked = self._count()
+        now = dt_util.now().isoformat(timespec="seconds")
+        more = checked > self._checked_count
+        self._checked_count = checked
+        if total and checked and checked / total >= self.trip_threshold:
+            if self.trip is None:
+                self.trip = {"start": now, "sidste_flueben": now}
+                _LOGGER.debug("Indkøbstur registreret (%s/%s afkrydset)", checked, total)
+            elif more:
+                self.trip["sidste_flueben"] = now
+        elif self.trip is not None:
+            _LOGGER.debug("Indkøbstur annulleret (%s/%s afkrydset)", checked, total)
+            self.trip = None
+
+    def trip_due(self) -> datetime | None:
+        if not self.trip:
+            return None
+        return dt_util.parse_datetime(self.trip["sidste_flueben"]) + self.trip_delay
+
+    @callback
+    def _on_tick(self, _now: datetime) -> None:
+        due = self.trip_due()
+        if due and dt_util.now() >= due:
+            self.finish_trip("Automatisk", auto=True)
+
+    @callback
+    def finish_trip(self, user: str | None = None, *, auto: bool = False, delete: bool = False) -> int:
+        """Afslut indkøbet: log turen og fjern fluebenene (eller de afkrydsede varer).
+
+        Købene er allerede registreret ved afkrydsning – her sættes kun en ny
+        grundlinje, så nulstillingen hverken fortryder køb eller tæller som tilføjelser.
+        """
+        checked = [ln for ln in self.indkob.items() if ln["checked"]]
+        if checked:
+            when = dt_util.parse_datetime(self.trip["sidste_flueben"]) if self.trip else dt_util.now()
+            trip = self.history.add_trip(when, [ln["text"] for ln in checked], auto)
+            self.hass.bus.async_fire(
+                EVENT_HANDLET_IND,
+                {"tidspunkt": trip["t"], "antal": len(trip["varer"]), "varer": trip["varer"], "automatisk": auto},
+            )
+        if delete:
+            n = self.indkob.clear_checked()
+        else:
+            n = len(checked)
+            for ln in self.indkob.lines:
+                ln["checked"] = False
+        self.trip = None
+        self._checked_count = 0
+        n_ = self.indkob
+        n_.version += 1
+        n_.updated = dt_util.now().isoformat(timespec="seconds")
+        n_.updated_by = user
+        n_.learn_categories()
+        self.history.set_baseline(self._history_items())
+        self.stats = self.history.compute(dt_util.now())
+        self._save()
+        self._notify()
+        return n
 
     @callback
     def add_item(self, text: str, user: str | None = None, **kwargs: Any) -> dict:
@@ -219,7 +312,15 @@ class IndkobMadplanManager:
     def state(self) -> dict:
         """Alt hvad panel og kort skal bruge."""
         return {
-            "indkob": {k: v for k, v in self.indkob.as_dict().items() if k != "categories"},
+            "indkob": {
+                **{k: v for k, v in self.indkob.as_dict().items() if k != "categories"},
+                "tur": {
+                    "aktiv": self.trip is not None,
+                    "start": self.trip["start"] if self.trip else None,
+                    "nulstilles": due.isoformat(timespec="minutes") if (due := self.trip_due()) else None,
+                    "taerskel": round(self.trip_threshold * 100),
+                },
+            },
             "madplan": {
                 **self.madplan_note.as_dict(),
                 "dage": self.uge(-1, 9),

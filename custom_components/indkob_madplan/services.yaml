@@ -26,6 +26,7 @@ tilfoej_forslag:
         text:
           multiple: true
 hent_statistik:
+handlet_ind:
 nulstil_statistik:
   fields:
     bekraeft:

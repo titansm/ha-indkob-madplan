@@ -14,6 +14,10 @@ from .const import (
     CONF_EXTRA_KOED,
     CONF_FROST_DAY,
     CONF_IGNORE_KOED,
+    CONF_TRIP_DELAY,
+    CONF_TRIP_THRESHOLD,
+    DEFAULT_TRIP_DELAY,
+    DEFAULT_TRIP_THRESHOLD,
     DOMAIN,
     FROST_TODAY,
     FROST_TOMORROW,
@@ -38,6 +42,16 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_IGNORE_KOED, default=defaults.get(CONF_IGNORE_KOED, "")
             ): selector.TextSelector(),
+            vol.Required(
+                CONF_TRIP_THRESHOLD, default=defaults.get(CONF_TRIP_THRESHOLD, DEFAULT_TRIP_THRESHOLD)
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=10, max=100, step=5, unit_of_measurement="%", mode=selector.NumberSelectorMode.SLIDER)
+            ),
+            vol.Required(
+                CONF_TRIP_DELAY, default=defaults.get(CONF_TRIP_DELAY, DEFAULT_TRIP_DELAY)
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.5, max=24, step=0.5, unit_of_measurement="timer", mode=selector.NumberSelectorMode.BOX)
+            ),
         }
     )
 

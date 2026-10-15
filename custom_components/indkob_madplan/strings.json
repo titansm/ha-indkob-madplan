@@ -6,11 +6,15 @@
         "data": {
           "frost_day": "Optøning gælder retten for",
           "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
-          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)"
+          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)",
+          "handlet_taerskel": "Handlet ind, når denne andel er krydset af",
+          "handlet_timer": "Fjern fluebenene efter (timer efter sidste flueben)"
         },
         "data_description": {
           "extra_koed_ord": "Fx: nasi goreng, tacos",
-          "ignorer_ord": "Fx: bacon"
+          "ignorer_ord": "Fx: bacon",
+          "handlet_taerskel": "Varerne registreres som købt ved afkrydsning; derefter fjernes fluebenene automatisk.",
+          "handlet_timer": "Fx 3"
         }
       }
     },
@@ -26,11 +30,15 @@
         "data": {
           "frost_day": "Optøning gælder retten for",
           "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
-          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)"
+          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)",
+          "handlet_taerskel": "Handlet ind, når denne andel er krydset af",
+          "handlet_timer": "Fjern fluebenene efter (timer efter sidste flueben)"
         },
         "data_description": {
           "extra_koed_ord": "Fx: nasi goreng, tacos",
-          "ignorer_ord": "Fx: bacon"
+          "ignorer_ord": "Fx: bacon",
+          "handlet_taerskel": "Varerne registreres som købt ved afkrydsning; derefter fjernes fluebenene automatisk.",
+          "handlet_timer": "Fx 3"
         }
       }
     }
@@ -59,6 +67,9 @@
       },
       "forslag": {
         "name": "Plejer at købe"
+      },
+      "sidste_indkob": {
+        "name": "Sidste indkøb"
       }
     },
     "binary_sensor": {
@@ -124,6 +135,10 @@
           "description": "En eller flere varer."
         }
       }
+    },
+    "handlet_ind": {
+      "name": "Handlet ind",
+      "description": "Registrér indkøbsturen og fjern alle flueben nu."
     }
   }
 }

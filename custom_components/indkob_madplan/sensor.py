@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.util import dt as dt_util
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -25,6 +26,7 @@ async def async_setup_entry(
             MadplanSensor(m, "madplan"),
             KoebtDenneUgeSensor(m, "koebt_denne_uge"),
             ForslagSensor(m, "forslag"),
+            SidsteIndkobSensor(m, "sidste_indkob"),
         ]
     )
 
@@ -120,4 +122,29 @@ class ForslagSensor(IndkobEntity, SensorEntity):
                 {"navn": f["navn"], "dage_siden": f["dage_siden"], "interval_dage": f["interval_dage"]}
                 for f in self.manager.stats.get("forslag", [])
             ]
+        }
+
+
+class SidsteIndkobSensor(IndkobEntity, SensorEntity):
+    _attr_icon = "mdi:cart-arrow-right"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def native_value(self):
+        t = self.manager.stats.get("seneste_tur")
+        return dt_util.parse_datetime(t) if t else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        s = self.manager.stats
+        ture = s.get("ture", [])
+        tur = self.manager.trip
+        return {
+            "varer": ture[0]["varer"] if ture else [],
+            "antal": ture[0]["antal"] if ture else 0,
+            "ture_i_alt": s.get("antal_ture", 0),
+            "varer_pr_tur": s.get("varer_pr_tur"),
+            "dage_mellem_ture": s.get("dage_mellem_ture"),
+            "handler_nu": tur is not None,
+            "flueben_fjernes": due.isoformat() if (due := self.manager.trip_due()) else None,
         }

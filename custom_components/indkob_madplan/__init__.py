@@ -71,6 +71,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: IndkobConfigEntry) -> bo
         sidebar_icon=PANEL_ICON,
         require_admin=False,
         config={},
+        # Panelet tegner selv under statuslinjen (iOS); ellers lægger HA en tom bjælke ovenover.
+        handle_safe_area=True,
     )
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
@@ -191,15 +193,12 @@ def ws_indkob__move(m: IndkobMadplanManager, msg: dict, user: str | None) -> Non
 
 @_ws({})
 def ws_indkob__clear_checked(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    n = m.indkob.clear_checked()
-    m.indkob_changed(user)
-    return {"fjernet": n}
+    return {"fjernet": m.finish_trip(user, delete=True)}
 
 
 @_ws({})
 def ws_indkob__uncheck_all(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
-    m.indkob.uncheck_all()
-    m.indkob_changed(user)
+    m.finish_trip(user)
 
 
 @_ws({vol.Required("text"): str, vol.Optional("base_version"): vol.Any(int, None)})
@@ -245,6 +244,9 @@ def _register_services(hass: HomeAssistant) -> None:
         m = _manager(hass)
         return {"stats": m.stats, "madplan": m.uge(-7, 21)}
 
+    async def _finish(call: ServiceCall) -> dict[str, Any]:
+        return {"fjernet": _manager(hass).finish_trip("Home Assistant")}
+
     async def _clear(call: ServiceCall) -> None:
         await _manager(hass).async_clear_history()
 
@@ -264,6 +266,7 @@ def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(DOMAIN, "hent_statistik", _stats, supports_response=SupportsResponse.ONLY)
+    hass.services.async_register(DOMAIN, "handlet_ind", _finish, supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(
         DOMAIN, "nulstil_statistik", _clear,
         schema=vol.Schema({vol.Required("bekraeft"): vol.All(cv.boolean, vol.In([True]))}),
