@@ -6,6 +6,7 @@ Familiens indkøbsliste og madplan som to noter direkte i Home Assistant – i s
 - **Dashboard-kort** `custom:indkob-madplan-card` – aftensmad i dag/i morgen, optøningspåmindelse, indkøbsliste til afkrydsning, forslag og statistik.
 - **Statistik** – hvert flueben logges som et køb: top-varer, interval, køb pr. uge, indkøbsture og forslag til varer I plejer at købe.
 - **Handlet ind** – når mindst 50 % af varerne er krydset af, regnes det som en indkøbstur. 3 timer efter sidste flueben fjernes alle flueben automatisk, og turen gemmes i statistikken (tærskel og timer kan ændres under integrationens indstillinger).
+- **Bliver på listen** – lukker iOS HA-appen i baggrunden, mens indkøbslisten er åben, vender man tilbage til listen (inden for 2 timer). Genvej direkte til listen: `homeassistant://navigate/indkob-madplan?note=indkob`.
 - **Flyt varer** – træk i ≡-håndtaget for at flytte en vare, fx ind under en anden overskrift. Nye varer med samme navn lander fremover samme sted.
 - **Madplan** – formatet `Uge NN` + `Onsdag: tit nat - kylling i karry (stor portion)`. Nyeste uge øverst; en uge kan løbe fra onsdag til torsdag.
 
