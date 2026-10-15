@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.3.1";
+export const VERSION = "0.3.2";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -50,6 +50,51 @@ export function prettyHeader(s) {
     return lead + low.charAt(0).toUpperCase() + low.slice(1);
   }
   return t;
+}
+
+/* ------------------------------------------------------------------ genoptag indkøbslisten
+ * Lukker iOS appen i baggrunden, mens indkøbslisten er åben, starter HA-appen bagefter
+ * på sin forside. Panelet gemmer derfor et "jeg stod i listen"-mærke, når siden skjules,
+ * og ved næste opstart sender vi brugeren tilbage til listen (inden for RESUME_MAX). */
+const RESUME_KEY = "resume";
+const RESUME_MAX = 2 * 60 * 60 * 1000; // 2 timer
+
+export function markResume() {
+  lsSet(RESUME_KEY, { t: Date.now() });
+}
+export function clearResume() {
+  lsSet(RESUME_KEY, null);
+}
+
+export function scrollerOf(el) {
+  if (el && el.scrollHeight > el.clientHeight + 1) return el;
+  return document.scrollingElement || document.documentElement;
+}
+
+let _resumeTried = false;
+export function resumeIfShopping() {
+  if (_resumeTried) return;
+  _resumeTried = true;
+  // Navigerer man selv væk fra panelet, mens appen er synlig, droppes genoptagelsen.
+  const onNav = () => {
+    if (document.visibilityState === "visible" && !location.pathname.startsWith(PANEL_PATH)) clearResume();
+  };
+  window.addEventListener("location-changed", () => setTimeout(onNav, 0));
+  window.addEventListener("popstate", () => setTimeout(onNav, 0));
+  const r = lsGet(RESUME_KEY, null);
+  if (!r || !r.t || Date.now() - r.t > RESUME_MAX) return;
+  const started = Date.now();
+  const tick = () => {
+    const ha = document.querySelector("home-assistant");
+    if (!ha?.hass) {
+      if (Date.now() - started < 15000) setTimeout(tick, 150);
+      return;
+    }
+    if (location.pathname.startsWith(PANEL_PATH)) return;
+    history.replaceState(null, "", PANEL_PATH);
+    window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: true } }));
+  };
+  tick();
 }
 
 /* ------------------------------------------------------------------ store
@@ -171,13 +216,10 @@ export class Checklist {
     this.render();
   }
 
-  /* ------------------------------------------------------------ træk og slip */
-  _visibleSibling(row, dir) {
-    let r = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
-    while (r && r.hidden) r = dir < 0 ? r.previousElementSibling : r.nextElementSibling;
-    return r;
-  }
-
+  /* ------------------------------------------------------------ træk og slip
+   * Rækken bliver liggende i DOM'en under trækket (flyttes den, mister iOS Safari
+   * fingeren og trækket "hænger"). Den tegnes forskudt med translateY, og en
+   * markeringslinje viser, hvor den lander. Lyttere sidder på window. */
   _dragStart(e, grip) {
     const row = grip.closest("[data-id]");
     if (!row || this.drag) return;
@@ -185,50 +227,90 @@ export class Checklist {
     this._flush(row.dataset.id);
     const ae = this.el.getRootNode().activeElement;
     if (ae && this.el.contains(ae)) ae.blur();
-    grip.setPointerCapture?.(e.pointerId);
-    this.drag = { id: row.dataset.id, row, grip, startY: e.clientY, y: e.clientY, pointerId: e.pointerId, raf: 0 };
+    try { grip.setPointerCapture?.(e.pointerId); } catch (err) {}
+    const sc = this._scrollEl();
+    const scroll0 = sc.scrollTop;
+    const r0 = row.getBoundingClientRect();
+    // Midtpunkter i "indholds-koordinater" (uafhængige af scroll)
+    const targets = [...this.el.children]
+      .filter((el) => el !== row && el.dataset?.id && !el.hidden)
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { el, mid: r.top + r.height / 2 + scroll0 };
+      });
+    const line = document.createElement("div");
+    line.className = "drop";
+    line.hidden = true;
+    this.el.appendChild(line);
+    this.drag = {
+      id: row.dataset.id, row, line, targets, sc, pointerId: e.pointerId,
+      startY: e.clientY, y: e.clientY, scroll0, center0: r0.top + r0.height / 2 + scroll0,
+      before: undefined, raf: 0,
+    };
     row.classList.add("dragging");
     this.el.classList.add("sorting");
     if (navigator.vibrate) navigator.vibrate(10);
-    this._onMove = (ev) => ev.pointerId === this.drag?.pointerId && this._dragMove(ev);
-    this._onUp = (ev) => ev.pointerId === this.drag?.pointerId && this._dragEnd(ev.type === "pointercancel");
-    grip.addEventListener("pointermove", this._onMove);
-    grip.addEventListener("pointerup", this._onUp);
-    grip.addEventListener("pointercancel", this._onUp);
-    this._autoScroll();
-  }
-
-  _dragMove(e) {
-    e.preventDefault();
-    const d = this.drag;
-    d.y = e.clientY;
+    this._onMove = (ev) => {
+      if (!this.drag || (ev.pointerId !== undefined && ev.pointerId !== this.drag.pointerId)) return;
+      ev.preventDefault?.();
+      this.drag.y = ev.clientY ?? ev.touches?.[0]?.clientY ?? this.drag.y;
+      this._reposition();
+    };
+    this._onUp = (ev) => {
+      if (!this.drag || (ev.pointerId !== undefined && ev.pointerId !== this.drag.pointerId)) return;
+      this._dragEnd(ev.type === "pointercancel" || ev.type === "touchcancel" || ev.type === "blur");
+    };
+    window.addEventListener("pointermove", this._onMove, { passive: false });
+    window.addEventListener("pointerup", this._onUp);
+    window.addEventListener("pointercancel", this._onUp);
+    window.addEventListener("touchmove", this._onMove, { passive: false });
+    window.addEventListener("touchend", this._onUp);
+    window.addEventListener("touchcancel", this._onUp);
+    window.addEventListener("blur", this._onUp);
     this._reposition();
+    this._autoScroll();
   }
 
   _reposition() {
     const d = this.drag;
-    const row = d.row;
-    let dy = d.y - d.startY;
-    // flyt rækken i DOM'en, når fingeren (rækkens midte) passerer midten af naboen
-    for (let guard = 0; guard < 200; guard++) {
-      const dir = dy > 0 ? 1 : -1;
-      const nb = this._visibleSibling(row, dir);
-      if (!nb || Math.abs(dy) < (nb.offsetHeight + row.offsetHeight) / 2) break;
-      const before = row.offsetTop;
-      if (dir > 0) nb.after(row);
-      else nb.before(row);
-      d.startY += row.offsetTop - before;
-      dy = d.y - d.startY;
+    if (!d) return;
+    const scroll = d.sc.scrollTop;
+    const dy = d.y - d.startY + (scroll - d.scroll0);
+    d.row.style.transform = `translateY(${dy}px)`;
+    const center = d.center0 + dy;
+    // Første synlige række (i rækkefølge), hvis midte ligger under rækkens midte
+    const hit = d.targets.find((t) => t.mid > center);
+    const before = hit ? hit.el : null; // null = sidst
+    if (before === d.before) return;
+    d.before = before;
+    // Ingen linje, hvis rækken ville lande, hvor den allerede står
+    const next = this._visibleSibling(d.row, 1);
+    if (before === (next || null)) {
+      d.line.hidden = true;
+      return;
     }
-    row.style.transform = `translateY(${dy}px)`;
+    d.line.hidden = false;
+    if (before) before.before(d.line);
+    else this.el.appendChild(d.line);
+  }
+
+  /* Det element, der faktisk scroller: panelets ark, ellers hele siden. */
+  _scrollEl() {
+    return scrollerOf(typeof this.scroller === "function" ? this.scroller() : this.scroller);
+  }
+
+  _visibleSibling(row, dir) {
+    let r = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+    while (r && (r.hidden || r.classList.contains("drop"))) r = dir < 0 ? r.previousElementSibling : r.nextElementSibling;
+    return r;
   }
 
   _autoScroll() {
     const d = this.drag;
     if (!d) return;
-    const sc = this.scroller;
-    if (sc) {
-      const r = sc.getBoundingClientRect();
+    const sc = d.sc;
+    {
+      const r = sc === document.scrollingElement ? { top: 0, bottom: window.innerHeight } : sc.getBoundingClientRect();
       const edge = 70;
       let v = 0;
       if (d.y < r.top + edge) v = -Math.ceil((r.top + edge - d.y) / 6);
@@ -236,11 +318,7 @@ export class Checklist {
       if (v) {
         const before = sc.scrollTop;
         sc.scrollTop += v;
-        const moved = sc.scrollTop - before;
-        if (moved) {
-          d.startY -= moved;
-          this._reposition();
-        }
+        if (sc.scrollTop !== before) this._reposition();
       }
     }
     d.raf = requestAnimationFrame(() => this._autoScroll());
@@ -249,35 +327,36 @@ export class Checklist {
   _dragEnd(cancel) {
     const d = this.drag;
     if (!d) return;
+    this.drag = null;
     cancelAnimationFrame(d.raf);
-    d.grip.removeEventListener("pointermove", this._onMove);
-    d.grip.removeEventListener("pointerup", this._onUp);
-    d.grip.removeEventListener("pointercancel", this._onUp);
+    for (const [t, f] of [["pointermove", this._onMove], ["pointerup", this._onUp], ["pointercancel", this._onUp],
+      ["touchmove", this._onMove], ["touchend", this._onUp], ["touchcancel", this._onUp], ["blur", this._onUp]]) {
+      window.removeEventListener(t, f);
+    }
+    const moved = !d.line.hidden;
+    const before = d.before;
+    d.line.remove();
     d.row.classList.remove("dragging");
     d.row.style.transform = "";
     this.el.classList.remove("sorting");
-    this.drag = null;
-    const prevRow = d.row.previousElementSibling;
-    const afterId = prevRow ? prevRow.dataset.id : null;
-    const oldIdx = this.lines.findIndex((l) => l.id === d.id);
-    const oldAfter = oldIdx > 0 ? this.lines[oldIdx - 1].id : null;
     const pending = this._pending;
     this._pending = null;
-    if (cancel || afterId === oldAfter || oldIdx < 0) {
-      this.setLines(pending || this.lines);
+    const base = pending || this.lines;
+    if (cancel || !moved) {
+      this.setLines(base);
       return;
     }
-    // optimistisk: flyt lokalt, send til HA
-    const lines = [...(pending || this.lines)];
-    const i = lines.findIndex((l) => l.id === d.id);
-    if (i >= 0) {
-      const [ln] = lines.splice(i, 1);
-      const j = afterId ? lines.findIndex((l) => l.id === afterId) + 1 : 0;
-      lines.splice(j, 0, ln);
-    }
+    // Ny placering: efter linjen, der står lige før `before` (eller sidst)
+    const lines = base.filter((l) => l.id !== d.id);
+    const ln = base.find((l) => l.id === d.id);
+    if (!ln) return this.setLines(base);
+    const j = before ? lines.findIndex((l) => l.id === before.dataset.id) : lines.length;
+    const pos = j < 0 ? lines.length : j;
+    const afterId = pos > 0 ? lines[pos - 1].id : null;
+    lines.splice(pos, 0, ln);
     this.setLines(lines);
     if (navigator.vibrate) navigator.vibrate(8);
-    this.store.move(d.id, afterId).catch(() => this.setLines(pending || this.lines));
+    this.store.move(d.id, afterId).catch(() => this.setLines(base));
   }
 
   render() {
@@ -595,9 +674,12 @@ export const BASE_CSS = `
           -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .grip:hover { opacity: .9; }
   .ln.dragging { position: relative; z-index: 3; background: var(--im-bg); border-radius: 10px;
-                 box-shadow: 0 6px 22px rgba(0,0,0,.22); cursor: grabbing; }
+                 box-shadow: 0 6px 22px rgba(0,0,0,.22); cursor: grabbing; opacity: .88; }
   .ln.dragging .grip { opacity: 1; color: var(--im-acc); cursor: grabbing; }
   .cl.sorting { -webkit-user-select: none; user-select: none; }
+  .drop { position: relative; height: 0; pointer-events: none; }
+  .drop::before { content: ""; position: absolute; left: 0; right: 0; top: -2px; height: 4px; border-radius: 2px;
+                  background: var(--im-acc-strong); }
   .cl.sorting .ln:not(.dragging) { transition: none; }
 
   /* aften */

@@ -3,7 +3,10 @@
  * valgfrit: vis_madplan (true), vis_liste (true), vis_statistik (true), skjul_koebte (true),
  *           kun_i_dag (false) – vis kun dagens ret; tryk på kortet åbner noterne
  */
-import * as C from "./im-common.js?v=0.3.1";
+import * as C from "./im-common.js?v=0.3.2";
+
+// Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
+C.resumeIfShopping();
 
 class IndkobMadplanCard extends HTMLElement {
   constructor() {

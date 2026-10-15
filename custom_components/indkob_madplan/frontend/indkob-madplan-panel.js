@@ -1,7 +1,8 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
-  BASE_CSS, Checklist, aftenHTML, esc, forslagHTML, getStore, lsGet, lsSet, nyUgeSkabelon, relTime, statsHTML,
-} from "./im-common.js?v=0.3.1";
+  BASE_CSS, Checklist, aftenHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume, nyUgeSkabelon,
+  relTime, scrollerOf, statsHTML,
+} from "./im-common.js?v=0.3.2";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -14,6 +15,17 @@ class IndkobMadplanPanel extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._open = lsGet("open", null); // null = notelisten (smal skærm)
+    // ?note=indkob / madplan / stats (fx fra en genvej på hjemmeskærmen)
+    const want = new URLSearchParams(location.search).get("note");
+    if (want && NOTES.some((n) => n.id === want)) {
+      this._open = want;
+      lsSet("open", want);
+    }
+    this._scrollRestored = false;
+    this._onHide = () => {
+      if (document.visibilityState === "hidden") this._saveScroll();
+      if (document.visibilityState === "hidden" && this._open === "indkob" && location.pathname.startsWith("/indkob-madplan")) markResume();
+    };
     this._hideChecked = lsGet("hideChecked", false);
     this._weekOpen = false;
     this._mpDirty = false;
@@ -38,7 +50,17 @@ class IndkobMadplanPanel extends HTMLElement {
   set panel(p) {}
   set route(r) {}
 
+  connectedCallback() {
+    document.addEventListener("visibilitychange", this._onHide);
+    window.addEventListener("pagehide", this._onHide);
+  }
+
   disconnectedCallback() {
+    document.removeEventListener("visibilitychange", this._onHide);
+    window.removeEventListener("pagehide", this._onHide);
+    this._saveScroll();
+    // Forlader man panellet med vilje (appen er synlig), skal det ikke genoptages.
+    if (document.visibilityState === "visible") clearResume();
     this._flushMadplan();
   }
 
@@ -130,6 +152,16 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderIndkob();
     this._renderMadplan();
     this.shadowRoot.getElementById("stats-body").innerHTML = statsHTML(s.stats);
+    if (!this._scrollRestored) {
+      this._scrollRestored = true;
+      const y = lsGet("scroll_" + (this._open || ""), 0);
+      if (y) requestAnimationFrame(() => requestAnimationFrame(() => (scrollerOf(this.shadowRoot.getElementById("ark")).scrollTop = y)));
+    }
+  }
+
+  _saveScroll() {
+    const ark = this.shadowRoot?.getElementById("ark");
+    if (ark && this._open) lsSet("scroll_" + this._open, Math.round(scrollerOf(ark).scrollTop));
   }
 
   _layout() {
@@ -264,8 +296,10 @@ class IndkobMadplanPanel extends HTMLElement {
     const note = e.target.closest("[data-note]");
     if (note) {
       this._flushMadplan();
+      this._saveScroll();
       this._open = note.dataset.note;
       lsSet("open", this._open);
+      lsSet("scroll_" + this._open, 0);
       this._layout();
       r.getElementById("ark").scrollTop = 0;
       return;
@@ -279,8 +313,10 @@ class IndkobMadplanPanel extends HTMLElement {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
     } else if (act === "tilbage") {
       this._flushMadplan();
+      this._saveScroll();
       this._open = null;
       lsSet("open", null);
+      clearResume();
       this._layout();
     } else if (act === "skjul") {
       this._hideChecked = !this._hideChecked;
@@ -335,10 +371,10 @@ const ICON_MORE = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="
 const PANEL_CSS = `
   :host { display: block; height: 100%; background: var(--primary-background-color, var(--im-bg2)); color: var(--im-text);
           font-family: var(--paper-font-body1_-_font-family, -apple-system, system-ui, Roboto, sans-serif); }
-  .app { display: grid; grid-template-columns: 300px 1fr; height: 100%; box-sizing: border-box;
+  .app { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: minmax(0, 1fr); height: 100%; box-sizing: border-box;
          padding-left: var(--safe-area-content-inset-left, 0px); padding-right: var(--safe-area-content-inset-right, 0px); }
   .liste { border-right: 1px solid var(--im-line); background: var(--im-bg2); overflow-y: auto; }
-  .note { display: flex; flex-direction: column; min-width: 0; background: var(--im-bg); height: 100%; }
+  .note { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--im-bg); height: 100%; }
   .bar { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 0 12px;
          padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px)); position: sticky; top: 0; z-index: 2; background: inherit; }
   .bar h1 { font-size: 1.25rem; margin: 0; font-weight: 700; }
