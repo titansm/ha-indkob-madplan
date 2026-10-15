@@ -6,11 +6,15 @@
         "data": {
           "frost_day": "Optøning gælder retten for",
           "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
-          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)"
+          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)",
+          "handlet_taerskel": "Shopping done when this share is checked",
+          "handlet_timer": "Uncheck everything after (hours since last check)"
         },
         "data_description": {
           "extra_koed_ord": "Fx: nasi goreng, tacos",
-          "ignorer_ord": "Fx: bacon"
+          "ignorer_ord": "Fx: bacon",
+          "handlet_taerskel": "Purchases are logged when checked; afterwards all checks are cleared automatically.",
+          "handlet_timer": "E.g. 3"
         }
       }
     },
@@ -26,11 +30,15 @@
         "data": {
           "frost_day": "Optøning gælder retten for",
           "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
-          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)"
+          "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)",
+          "handlet_taerskel": "Shopping done when this share is checked",
+          "handlet_timer": "Uncheck everything after (hours since last check)"
         },
         "data_description": {
           "extra_koed_ord": "Fx: nasi goreng, tacos",
-          "ignorer_ord": "Fx: bacon"
+          "ignorer_ord": "Fx: bacon",
+          "handlet_taerskel": "Purchases are logged when checked; afterwards all checks are cleared automatically.",
+          "handlet_timer": "E.g. 3"
         }
       }
     }
@@ -59,6 +67,9 @@
       },
       "forslag": {
         "name": "Plejer at købe"
+      },
+      "sidste_indkob": {
+        "name": "Last shopping trip"
       }
     },
     "binary_sensor": {
@@ -124,6 +135,10 @@
           "description": "En eller flere varer."
         }
       }
+    },
+    "handlet_ind": {
+      "name": "Shopping done",
+      "description": "Log the shopping trip and clear all checks now."
     }
   }
 }
