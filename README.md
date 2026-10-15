@@ -17,7 +17,7 @@ Familiens indkøbsliste og madplan som to noter direkte i Home Assistant – i s
 | `sensor.indkob_madplan_madplan` | Antal planlagte dage de næste 7 dage + ugens retter |
 | `sensor.indkob_madplan_kobt_denne_uge` | Antal købte varer denne uge + top 10 |
 | `sensor.indkob_madplan_plejer_at_kobe` | Forslag |
-| `sensor.indkob_madplan_sidste_indkob` | Tidspunkt for seneste indkøbstur (attributter: varer, antal, handler_nu, flueben_fjernes) |
+| `sensor.indkob_madplan_last_shopping_trip` | Tidspunkt for seneste indkøbstur (attributter: varer, antal, handler_nu, flueben_fjernes) |
 | `todo.indkob_madplan_indkobsliste` | Indkøbslisten som to-do-liste (Assist: "tilføj mælk til indkøbslisten") |
 
 ## Handlinger
@@ -32,4 +32,5 @@ type: custom:indkob-madplan-card
 # vis_liste: true
 # vis_statistik: true
 # skjul_koebte: true
+# kun_i_dag: false   # true = vis kun dagens ret (tryk åbner noterne)
 ```
