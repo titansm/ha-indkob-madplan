@@ -61,6 +61,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_madplan_retter, ws_settings_set, ws_stats_clear,
         ws_trip_update, ws_trip_add, ws_trip_delete,
         ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej, ws_indkob_kategori,
+        ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -129,6 +130,9 @@ def _ws(schema: dict):
                 result = func(m, msg, _user(connection))
             except KeyError:
                 connection.send_error(msg["id"], "not_found", "Linjen findes ikke længere")
+                return
+            except ValueError as err:
+                connection.send_error(msg["id"], "invalid", str(err))
                 return
             except ConflictError:
                 connection.send_error(msg["id"], "conflict", "Madplanen er ændret af en anden")
@@ -307,6 +311,21 @@ PAYMENTS = vol.All([{
     vol.Optional("butik", default=""): vol.All(str, vol.Length(max=60)),
     vol.Optional("beloeb", default=0): vol.All(vol.Coerce(float), vol.Range(min=0, max=100000)),
 }], vol.Length(max=10))
+
+
+@_ws({vol.Required("butik"): vol.All(str, vol.Length(max=60)), vol.Optional("beloeb"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=100000)))})
+def ws_indkob__butik_afslut(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.finish_store(msg["butik"], msg.get("beloeb"), user)
+
+
+@_ws({vol.Required("stop_id"): str, vol.Required("butik"): vol.All(str, vol.Length(max=60)), vol.Optional("beloeb"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=100000)))})
+def ws_indkob__butik_ret(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.edit_store(msg["stop_id"], msg["butik"], msg.get("beloeb"), user)
+
+
+@_ws({vol.Required("stop_id"): str})
+def ws_indkob__butik_fortryd(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
+    m.undo_store(msg["stop_id"], user)
 
 
 @_ws({vol.Required("trip_id"): str, vol.Required("betalinger"): PAYMENTS})

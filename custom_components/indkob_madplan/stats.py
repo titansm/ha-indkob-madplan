@@ -94,7 +94,7 @@ class History:
         self.apply_items(items, datetime.now())
 
     def add_trip(self, t: datetime, summaries: list[str], auto: bool) -> dict:
-        varer = [_clean_display(s) or s for s in summaries if not is_header(s)]
+        varer = clean_names(summaries)
         trip = {"id": uuid.uuid4().hex[:10], "t": t.isoformat(timespec="seconds"), "varer": varer,
                 "auto": auto, "betalinger": []}
         self.trips.append(trip)
@@ -122,7 +122,7 @@ class History:
             total = round(sum(b["beloeb"] for b in tr.get("betalinger", [])), 2)
             m = months.setdefault(tr["t"][:7], {"maaned": tr["t"][:7], "beloeb": 0.0, "ture": 0, "med_pris": 0})
             m["ture"] += 1
-            if tr.get("betalinger"):
+            if total:
                 m["med_pris"] += 1
                 m["beloeb"] = round(m["beloeb"] + total, 2)
             for b in tr.get("betalinger", []):
@@ -298,6 +298,11 @@ class History:
                 out.append({**it, "forfald": round(ratio, 2)})
         out.sort(key=lambda x: (-x["forfald"], -x["antal"]))
         return out[:limit]
+
+
+def clean_names(summaries: list[str]) -> list[str]:
+    """Visningsnavne for varer (uden overskrifter)."""
+    return [_clean_display(s) or s for s in summaries if not is_header(s)]
 
 
 def _clean_display(summary: str) -> str:

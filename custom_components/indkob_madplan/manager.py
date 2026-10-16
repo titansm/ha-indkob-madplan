@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from .const import (
     CONF_TRIP_THRESHOLD,
     DEFAULT_TRIP_DELAY,
     DEFAULT_TRIP_THRESHOLD,
+    EVENT_BUTIK_AFSLUTTET,
     EVENT_HANDLET_IND,
     FROST_TODAY,
     FROST_TOMORROW,
@@ -38,7 +40,7 @@ from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, parse_mad
 from .notes import TYPE_ITEM, ShoppingNote, TextNote
 from . import kategorier as kat
 from . import planner as pl
-from .stats import History, normalize
+from .stats import History, clean_names, normalize
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +66,8 @@ class IndkobMadplanManager:
         self._unsubs: list[CALLBACK_TYPE] = []
         self._listeners: set[Callable[[], None]] = set()
         # Indkøbstur: sat når min. X % af varerne er krydset af.
-        # {"start": iso, "sidste_flueben": iso}
+        # {"start": iso, "sidste_flueben": iso, "stops": [...], "hist_id": str}
+        # stops = butikker afsluttet i Handl: {"id", "butik", "beloeb", "t", "line_ids"}
         self.trip: dict[str, str] | None = None
         self._checked_count = 0
         # Redigeringslog: [{"t", "bruger", "note", "tekst", "k"?}] – nyeste sidst
@@ -275,6 +278,21 @@ class IndkobMadplanManager:
         now = dt_util.now().isoformat(timespec="seconds")
         more = checked > self._checked_count
         self._checked_count = checked
+        if self._stops():
+            # Mindst én butik er afsluttet med knappen: turen annulleres ikke.
+            # Varer, der får fjernet fluebenet, hører ikke længere til butikken.
+            checked_lines = {ln["id"]: ln["text"] for ln in self.indkob.items() if ln["checked"]}
+            for st in self._stops():
+                keep = [i for i in st["line_ids"] if i in checked_lines]
+                if len(keep) != len(st["line_ids"]):
+                    st["line_ids"] = keep
+                    if b := self._stop_payment(st["id"]):
+                        b["varer"] = clean_names([checked_lines[i] for i in keep])
+                        tr = self._hist_trip()
+                        tr["varer"] = [n for x in tr["betalinger"] for n in x.get("varer", [])]
+            if more:
+                self.trip["sidste_flueben"] = now
+            return
         if total and checked and checked / total >= self.trip_threshold:
             if self.trip is None:
                 self.trip = {"start": now, "sidste_flueben": now}
@@ -304,9 +322,16 @@ class IndkobMadplanManager:
         grundlinje, så nulstillingen hverken fortryder køb eller tæller som tilføjelser.
         """
         checked = [ln for ln in self.indkob.items() if ln["checked"]]
-        if checked:
+        trip = self._hist_trip()
+        if checked or trip:
             when = dt_util.parse_datetime(self.trip["sidste_flueben"]) if self.trip else dt_util.now()
-            trip = self.history.add_trip(when, [ln["text"] for ln in checked], auto)
+            if trip:  # turen blev oprettet, da den første butik blev afsluttet
+                names = [n for b in trip["betalinger"] for n in b.get("varer", [])]
+                names += [n for n in clean_names([ln["text"] for ln in checked]) if n not in names]
+                trip.update(t=when.isoformat(timespec="seconds"), varer=names, auto=auto)
+                self.history.trips.sort(key=lambda x: x["t"])
+            else:
+                trip = self.history.add_trip(when, [ln["text"] for ln in checked], auto)
             self.hass.bus.async_fire(
                 EVENT_HANDLET_IND,
                 {"tidspunkt": trip["t"], "antal": len(trip["varer"]), "varer": trip["varer"], "automatisk": auto},
@@ -336,6 +361,99 @@ class IndkobMadplanManager:
         self._save()
         self._notify()
         return n
+
+    # ------------------------------------------------------------ butik afsluttet (Handl)
+    def _stops(self) -> list[dict]:
+        return self.trip.setdefault("stops", []) if self.trip else []
+
+    def bought(self) -> dict[str, str]:
+        """Linje-id -> butik for varer købt i en butik, der er afsluttet på denne tur."""
+        return {i: st["butik"] for st in self._stops() for i in st["line_ids"]}
+
+    def _hist_trip(self) -> dict | None:
+        """Turens post i indkøbshistorikken (findes, når mindst én butik er afsluttet)."""
+        hid = self.trip.get("hist_id") if self.trip else None
+        if not hid:
+            return None
+        try:
+            return self.history.get_trip(hid)
+        except KeyError:  # slettet i historikken imens
+            self.trip.pop("hist_id", None)
+            return None
+
+    def _stop(self, stop_id: str) -> dict:
+        for st in self._stops():
+            if st["id"] == stop_id:
+                return st
+        raise KeyError(stop_id)
+
+    def _stop_payment(self, stop_id: str) -> dict | None:
+        tr = self._hist_trip()
+        return next((b for b in tr["betalinger"] if b.get("stop") == stop_id), None) if tr else None
+
+    @callback
+    def finish_store(self, butik: str, beloeb: float | None, user: str | None = None) -> dict:
+        """Afslut indkøbet i én butik: de nye afkrydsede varer + (valgfri) pris gemmes."""
+        butik = (butik or "").strip()[:60]
+        if not butik:
+            raise ValueError("Skriv hvilken butik I har handlet i")
+        bought = self.bought()
+        lines = [ln for ln in self.indkob.items() if ln["checked"] and ln["id"] not in bought and ln["text"].strip()]
+        if not lines:
+            raise ValueError("Der er ingen nye afkrydsede varer")
+        now = dt_util.now()
+        iso = now.isoformat(timespec="seconds")
+        if self.trip is None:
+            self.trip = {"start": iso, "sidste_flueben": iso}
+        self.trip["sidste_flueben"] = iso  # fluebenene fjernes først X timer efter sidste butik
+        tr = self._hist_trip()
+        if tr is None:
+            tr = self.history.add_trip(now, [], False)
+            self.trip["hist_id"] = tr["id"]
+        beloeb = round(float(beloeb or 0), 2)
+        stop = {"id": uuid.uuid4().hex[:8], "butik": butik, "beloeb": beloeb, "t": iso,
+                "line_ids": [ln["id"] for ln in lines]}
+        self._stops().append(stop)
+        varer = clean_names([ln["text"] for ln in lines])
+        tr["betalinger"].append({"butik": butik, "beloeb": beloeb, "varer": varer, "t": iso, "stop": stop["id"]})
+        tr["varer"] = [n for b in tr["betalinger"] for n in b.get("varer", [])]
+        tr["t"] = iso
+        self.history.trips.sort(key=lambda x: x["t"])
+        self._log(user, "indkob", f"afsluttede indkøbet i {butik}: {len(varer)} varer"
+                  + (f", {_kr(beloeb)}" if beloeb else ""), key=f"stop:{stop['id']}", window=600)
+        self.hass.bus.async_fire(EVENT_BUTIK_AFSLUTTET, {
+            "butik": butik, "beloeb": beloeb, "antal": len(varer), "varer": varer, "tidspunkt": iso,
+        })
+        self._trips_changed()
+        return {"stop_id": stop["id"], "butik": butik, "beloeb": beloeb, "antal": len(varer), "trip_id": tr["id"]}
+
+    @callback
+    def edit_store(self, stop_id: str, butik: str, beloeb: float | None, user: str | None = None) -> dict:
+        """Ret butik/pris for en afsluttet butik på den aktive tur."""
+        st = self._stop(stop_id)
+        butik = (butik or "").strip()[:60] or st["butik"]
+        st.update(butik=butik, beloeb=round(float(beloeb or 0), 2))
+        if b := self._stop_payment(stop_id):
+            b.update(butik=st["butik"], beloeb=st["beloeb"])
+        self._log(user, "indkob", f"rettede indkøbet i {butik}: " + (_kr(st["beloeb"]) if st["beloeb"] else "ingen pris"),
+                  key=f"stop:{stop_id}", window=600)
+        self._trips_changed()
+        return {"stop_id": stop_id, "butik": st["butik"], "beloeb": st["beloeb"]}
+
+    @callback
+    def undo_store(self, stop_id: str, user: str | None = None) -> None:
+        """Fortryd "Afslut indkøb i butik" – varerne forbliver afkrydsede."""
+        st = self._stop(stop_id)
+        self._stops().remove(st)
+        if tr := self._hist_trip():
+            tr["betalinger"] = [b for b in tr["betalinger"] if b.get("stop") != stop_id]
+            tr["varer"] = [n for b in tr["betalinger"] for n in b.get("varer", [])]
+            if not tr["betalinger"]:
+                self.history.delete_trip(tr["id"])
+                self.trip.pop("hist_id", None)
+        self._log(user, "indkob", f"fortrød afslutningen af indkøbet i {st['butik']}")
+        self._track_trip()  # uden butikker gælder tærsklen igen
+        self._trips_changed()
 
     def _existing(self, text: str) -> dict | None:
         """Samme vare på listen i forvejen (listen er en fast liste – ingen dubletter)."""
@@ -732,7 +850,17 @@ class IndkobMadplanManager:
     @callback
     def update_trip(self, trip_id: str, betalinger: list[dict], user: str | None = None) -> dict:
         tr = self.history.get_trip(trip_id)
-        tr["betalinger"] = _clean_payments(betalinger)
+        old = tr.get("betalinger", [])
+        new = _clean_payments(betalinger)
+        for i, b in enumerate(new):  # varer/butiks-id fra "Afslut indkøb i butik" bevares
+            if i < len(old):
+                b.update({k: old[i][k] for k in ("varer", "t", "stop") if k in old[i] and k not in b})
+        tr["betalinger"] = new
+        if self.trip and self.trip.get("hist_id") == trip_id:
+            keep = {b["stop"]: b for b in new if b.get("stop")}
+            self.trip["stops"] = [st for st in self._stops() if st["id"] in keep]
+            for st in self._stops():
+                st.update(butik=keep[st["id"]]["butik"] or st["butik"], beloeb=keep[st["id"]]["beloeb"])
         self._log(user, "historik", f"angav pris for indkøbet {_dato(tr['t'])}: {_payments_text(tr['betalinger'])}",
                   key=f"trip:{trip_id}", window=600)
         self._trips_changed()
@@ -753,6 +881,9 @@ class IndkobMadplanManager:
     @callback
     def delete_trip(self, trip_id: str, user: str | None = None) -> None:
         tr = self.history.delete_trip(trip_id)
+        if self.trip and self.trip.get("hist_id") == trip_id:
+            self.trip.pop("hist_id", None)
+            self.trip["stops"] = []
         self._log(user, "historik", f"slettede indkøbet {_dato(tr['t'])}")
         self._trips_changed()
 
@@ -775,6 +906,12 @@ class IndkobMadplanManager:
                     "nulstilles": due.isoformat(timespec="minutes") if (due := self.trip_due()) else None,
                     "taerskel": round(self.trip_threshold * 100),
                     "timer": self.trip_delay.total_seconds() / 3600,
+                    "butikker": [
+                        {"id": st["id"], "butik": st["butik"], "beloeb": st["beloeb"], "t": st["t"],
+                         "antal": len(st["line_ids"])}
+                        for st in self._stops()
+                    ],
+                    "koebt": self.bought(),
                 },
             },
             "madplan": {
@@ -826,7 +963,13 @@ def _clean_payments(betalinger: list[dict]) -> list[dict]:
         except (TypeError, ValueError):
             beloeb = 0.0
         if butik or beloeb:
-            out.append({"butik": butik, "beloeb": beloeb})
+            x = {"butik": butik, "beloeb": beloeb}
+            if isinstance(b.get("varer"), list):
+                x["varer"] = [str(v)[:80] for v in b["varer"]][:200]
+            for k in ("t", "stop"):
+                if b.get(k):
+                    x[k] = str(b[k])[:40]
+            out.append(x)
     return out
 
 

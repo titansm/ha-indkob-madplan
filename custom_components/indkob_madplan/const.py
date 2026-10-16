@@ -1,7 +1,7 @@
 """Konstanter for Indkøb & Madplan."""
 
 DOMAIN = "indkob_madplan"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 CONF_FROST_DAY = "frost_day"
 CONF_EXTRA_KOED = "extra_koed_ord"
@@ -20,6 +20,7 @@ NOTE_MADPLAN = "madplan"
 
 SIGNAL_UPDATE = f"{DOMAIN}_update"
 EVENT_HANDLET_IND = f"{DOMAIN}_handlet_ind"
+EVENT_BUTIK_AFSLUTTET = f"{DOMAIN}_butik_afsluttet"
 STORAGE_KEY = DOMAIN
 STORAGE_VERSION = 1
 
