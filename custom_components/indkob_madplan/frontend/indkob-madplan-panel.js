@@ -2,7 +2,8 @@
 import {
   BASE_CSS, Checklist, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.4.0";
+} from "./im-common.js?v=0.5.0";
+import "./im-planner.js?v=0.5.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -136,6 +137,11 @@ class IndkobMadplanPanel extends HTMLElement {
               <h2 class="titel">Madplan</h2>
               <p class="meta" id="meta-madplan"></p>
               <div class="aften" id="aften"></div>
+              <button class="plan-cta" id="plan-cta" data-act="planlaeg" hidden>
+                <span class="pc-ikon" aria-hidden="true">✨</span>
+                <span class="pc-tekst"><b id="plan-cta-titel">Planlæg næste uge</b><small id="plan-cta-sub">Forslag ud fra det, I plejer at spise</small></span>
+                <span class="pc-pil" aria-hidden="true">›</span>
+              </button>
               <details class="insp" id="insp">
                 <summary>💡 Inspiration fra tidligere uger</summary>
                 <input id="insp-sog" type="search" placeholder="Søg i madplanen, fx karry …" aria-label="Søg i madplanen" autocomplete="off" />
@@ -197,6 +203,16 @@ class IndkobMadplanPanel extends HTMLElement {
                   <input type="radio" name="frost" value="i_morgen" data-set="frost_day" /></label>
               </div>
               <p class="fod">Styrer "Tag kød op af fryseren" og ❄-linjen. Notifikationen kl. 10 sendes af en automation i Home Assistant.</p>
+
+              <h3 class="gruppe">Ugeplanlæggeren</h3>
+              <div class="kort">
+                <label class="felt">
+                  <span class="fl">Kalender<small>Nattevagter, fodbold og aftenaftaler</small></span>
+                  <span class="fv"><select id="s-kalender" data-set="madplan_kalender"></select></span>
+                </label>
+                <div class="felt lodret" id="s-skjulte"></div>
+              </div>
+              <p class="fod">Planlæggeren kigger i kalenderen for at finde travle aftener, hvor den foreslår nemme retter eller rester.</p>
 
               <h3 class="gruppe">Kød-ord</h3>
               <div class="kort">
@@ -276,6 +292,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderNoteList();
     this._renderIndkob();
     this._renderMadplan();
+    if (this._planner) this._planner.hassState = s;
     if (this._insp.data && this._insp.version !== s.madplan.version) this._renderInsp();
     this.shadowRoot.getElementById("stats-body").innerHTML = statsHTML(s.stats);
     this._renderHelp();
@@ -361,7 +378,8 @@ class IndkobMadplanPanel extends HTMLElement {
           <button data-act="fjern-flueben">Færdig med at handle – fjern alle flueben</button>
         </div>`;
     } else if (open === "madplan") {
-      t.innerHTML = `<button class="vk" data-act="ny-uge" title="Indsæt ny uge øverst">Ny uge</button>`;
+      t.innerHTML = `<button class="vk" data-act="planlaeg" title="Forslag til næste uges madplan">Planlæg</button>
+        <button class="vk" data-act="ny-uge" title="Indsæt en tom uge øverst">Ny uge</button>`;
     } else t.innerHTML = "";
   }
 
@@ -566,6 +584,14 @@ class IndkobMadplanPanel extends HTMLElement {
     r.getElementById("s-std").textContent = i.standard_koed_ord.join(", ") +
       `. Retter med "${i.rest_ord.join('", "')}" kræver aldrig optøning; "fra fryser" gør altid.`;
     r.getElementById("s-version").textContent = `Indkøb & Madplan ${i.version}`;
+    const kal = r.getElementById("s-kalender");
+    if (focus !== kal) {
+      kal.innerHTML = `<option value="">Ingen</option>` + (i.kalendere || [])
+        .map((k) => `<option value="${esc(k.entity_id)}" ${k.entity_id === i.madplan_kalender ? "selected" : ""}>${esc(k.navn)}</option>`).join("");
+    }
+    const sk = i.skjulte_retter || [];
+    r.getElementById("s-skjulte").innerHTML = `<span class="fl">Retter der ikke foreslås${sk.length ? "" : "<small>Ingen endnu – vælg \"Foreslå ikke igen\" på en ret i planlæggeren</small>"}</span>` +
+      sk.map((n) => `<span class="skjult-r"><span>${esc(n)}</span><button class="link" data-act="vis-ret" data-navn="${esc(n)}">Foreslå igen</button></span>`).join("");
   }
 
   async _settingChanged(e) {
@@ -592,6 +618,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const r = this.shadowRoot;
     const mp = s.madplan;
     r.getElementById("aften").innerHTML = aftenHTML(mp, { weekOpen: this._weekOpen });
+    this._renderPlanCta(mp);
     r.getElementById("meta-madplan").textContent = mp.updated
       ? `Ændret ${relTime(mp.updated)}${mp.updated_by ? " af " + mp.updated_by : ""}`
       : "";
@@ -606,6 +633,35 @@ class IndkobMadplanPanel extends HTMLElement {
         `${mp.updated_by || "En anden"} har ændret madplanen imens.`;
       r.getElementById("konflikt").hidden = false;
     }
+  }
+
+  /* ------------------------------------------------------------ ugeplanlægger */
+  _renderPlanCta(mp) {
+    const r = this.shadowRoot;
+    const cta = r.getElementById("plan-cta");
+    // Vis knappen, når der mangler en ret i de næste 3 dage
+    const naeste = (mp.dage || []).filter((d) => d.offset >= 0 && d.offset <= 2);
+    const mangler = naeste.find((d) => !d.ret);
+    cta.hidden = !mangler;
+    if (mangler) {
+      r.getElementById("plan-cta-titel").textContent = mangler.offset === 0 ? "Planlæg ugen fra i dag" : `Planlæg ugen fra ${mangler.ugedag.toLowerCase()}`;
+    }
+  }
+
+  _openPlanner() {
+    this._flushMadplan();
+    if (this._planner) return;
+    const el = document.createElement("im-ugeplan");
+    this._planner = el;
+    el.addEventListener("luk", () => {
+      el.remove();
+      this._planner = null;
+      const ark = this.shadowRoot.getElementById("ark");
+      if (this._open === "madplan" && ark) ark.scrollTop = 0;
+    });
+    el.addEventListener("toast", (e) => this._toast(e.detail, { ms: 4000 }));
+    this.shadowRoot.appendChild(el);
+    el.open(this._store, this._state);
   }
 
   /* ------------------------------------------------------------ inspiration */
@@ -794,6 +850,11 @@ class IndkobMadplanPanel extends HTMLElement {
       this._mpCaret = pos;
       ta.setSelectionRange(pos, pos);
       r.getElementById("ark").scrollTop = 0;
+    } else if (act === "planlaeg") {
+      this._openPlanner();
+    } else if (act === "vis-ret") {
+      b.disabled = true;
+      await this._store.send("madplan/skjul", { navn: b.dataset.navn, skjul: false });
     } else if (act === "ret") {
       this._insertRet(b.dataset.navn);
     } else if (act === "autofill") {
@@ -946,6 +1007,15 @@ const PANEL_CSS = `
   #cl[data-empty]::before { content: "Listen er tom. Skriv en vare ovenfor."; color: var(--im-dim); padding: 12px 0; }
   .ny-linje { color: var(--im-acc); font-weight: 600; padding: 14px 0; }
 
+  .plan-cta { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin: -4px 0 16px; padding: 12px 14px;
+              border-radius: 14px; background: color-mix(in srgb, var(--im-acc-strong) 20%, var(--im-bg2)); }
+  .plan-cta:active { filter: brightness(.96); }
+  .pc-ikon { font-size: 24px; line-height: 1; }
+  .pc-tekst { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+  .pc-tekst b { font-size: 17px; }
+  .pc-tekst small { font-size: 13.5px; color: var(--im-dim); margin-top: 1px; }
+  .pc-pil { font-size: 26px; color: var(--im-acc); line-height: 1; }
+  .skjult-r { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 16px; }
   .aften { padding: 14px 16px 12px; background: var(--im-bg2); border-radius: 14px; margin-bottom: 16px; }
   #mp { width: 100%; box-sizing: border-box; min-height: 50vh; resize: none; border: 0; outline: none; background: transparent;
         color: var(--im-text); font: inherit; font-size: 17px; line-height: 1.55; padding: 0; overflow: hidden; }
