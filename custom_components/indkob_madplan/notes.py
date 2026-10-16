@@ -9,6 +9,7 @@ import re
 import uuid
 from typing import Any
 
+from . import kategorier as K
 from .stats import is_header, normalize
 
 TYPE_ITEM = "item"
@@ -108,21 +109,122 @@ class ShoppingNote:
             pos -= 1
         return pos
 
-    def _auto_position(self, text: str) -> int:
-        """Placér under den overskrift varen plejer at stå under."""
-        header = self.categories.get(normalize(text))
-        if not header:
-            return self._end_position()
-        start = next(
-            (i for i, ln in enumerate(self.lines) if ln["type"] == TYPE_HEADER and ln["text"] == header),
+    # ------------------------------------------------------------ kategorier
+    def _group_end(self, header_idx: int) -> int:
+        """Indsætningssted efter sidste vare i overskriftens gruppe (før tomme linjer)."""
+        end = header_idx + 1
+        while end < len(self.lines) and self.lines[end]["type"] != TYPE_HEADER:
+            end += 1
+        while end > header_idx + 1 and self.lines[end - 1]["type"] == TYPE_BLANK:
+            end -= 1
+        return end
+
+    def _header_index(self, text: str) -> int | None:
+        return next(
+            (i for i, ln in enumerate(self.lines) if ln["type"] == TYPE_HEADER and ln["text"] == text),
             None,
         )
-        if start is None:
-            return self._end_position()
-        pos = start + 1
-        while pos < len(self.lines) and self.lines[pos]["type"] == TYPE_ITEM:
-            pos += 1
-        return pos
+
+    def find_category(self, noegle: str) -> int | None:
+        """Indeks på overskriften for en fast kategori (første match)."""
+        for i, ln in enumerate(self.lines):
+            if ln["type"] == TYPE_HEADER and K.header_noegle(ln["text"]) == noegle:
+                return i
+        return None
+
+    def ensure_category(self, noegle: str) -> int:
+        """Find den faste kategori – opret overskriften på butikkens plads, hvis den mangler."""
+        idx = self.find_category(noegle)
+        if idx is not None:
+            return idx
+        orden = K.ORDEN[noegle]
+        header = {"id": new_id(), "text": K.NAVN[noegle], "type": TYPE_HEADER, "checked": False}
+        blank = {"id": new_id(), "text": "", "type": TYPE_BLANK, "checked": False}
+        for i, ln in enumerate(self.lines):
+            if ln["type"] != TYPE_HEADER:
+                continue
+            k = K.header_noegle(ln["text"])
+            if k is not None and K.ORDEN[k] > orden:
+                self.lines[i:i] = [header, blank]
+                return i
+        pos = self._end_position()
+        new = [header] if pos == 0 else [blank, header]
+        self.lines[pos:pos] = new
+        return pos + len(new) - 1
+
+    def learned_header(self, text: str) -> str | None:
+        """Den overskrift varen plejer at stå under (også ved ental/flertal)."""
+        key = normalize(text)
+        if not key:
+            return None
+        if (h := self.categories.get(key)) and self._header_index(h) is not None:
+            return h
+        st = K.stamme(key)
+        for k, h in self.categories.items():
+            if K.stamme(k) == st and self._header_index(h) is not None:
+                return h
+        return None
+
+    def place(self, text: str) -> tuple[int, str]:
+        """Hvor en ny vare skal stå: (indeks, hvordan kategorien blev fundet).
+
+        1) under overskriften varen plejer at stå under, 2) gæt ud fra ordlisten,
+        3) ellers under Ugevarer (eller sidst, hvis listen ikke har kategorier).
+        """
+        if (h := self.learned_header(text)) is not None:
+            return self._group_end(self._header_index(h)), "laert"
+        noegle = K.gaet(text)
+        kilde = "gaet"
+        if noegle is None:
+            noegle, kilde = K.FALLBACK, "ukendt"
+            if self.find_category(noegle) is None and not any(ln["type"] == TYPE_HEADER for ln in self.lines):
+                return self._end_position(), kilde
+        return self._group_end(self.ensure_category(noegle)), kilde
+
+    def _auto_position(self, text: str) -> int:
+        return self.place(text)[0]
+
+    def move_to_category(self, line_id: str, *, header_id: str | None = None, noegle: str | None = None) -> None:
+        """Flyt en vare til sidst i en kategori (overskrift efter id eller fast nøgle)."""
+        ln = self.lines.pop(self.index(line_id))
+        try:
+            if header_id:
+                idx = self.index(header_id)
+                if self.lines[idx]["type"] != TYPE_HEADER:
+                    raise KeyError(header_id)
+            elif noegle in K.ORDEN:
+                idx = self.ensure_category(noegle)
+            else:
+                raise KeyError(noegle)
+        except KeyError:
+            self.lines.insert(self._end_position(), ln)
+            raise
+        self.lines.insert(self._group_end(idx), ln)
+
+    def category_of(self, line_id: str) -> str | None:
+        return self.header_of(self.index(line_id))
+
+    def category_overview(self) -> list[dict]:
+        """Overskrifter i rækkefølge + faste kategorier der ikke findes endnu (til kategorivælgeren)."""
+        out: list[dict] = []
+        seen: set[str] = set()
+        cur = None
+        for ln in self.lines:
+            if ln["type"] == TYPE_HEADER:
+                k = K.header_noegle(ln["text"])
+                cur = {"id": ln["id"], "navn": ln["text"], "fast": k, "varer": 0}
+                out.append(cur)
+                if k:
+                    seen.add(k)
+            elif ln["type"] == TYPE_ITEM and cur is not None:
+                cur["varer"] += 1
+        # Manglende faste kategorier sættes ind på butikkens plads
+        for k, navn in K.FASTE:
+            if k in seen:
+                continue
+            pos = next((i for i, c in enumerate(out) if c["fast"] and K.ORDEN[c["fast"]] > K.ORDEN[k]), len(out))
+            out.insert(pos, {"id": None, "navn": navn, "fast": k, "varer": 0})
+        return out
 
     def update(self, line_id: str, *, text: str | None = None, checked: bool | None = None, line_type: str | None = None) -> dict:
         ln = self.get(line_id)

@@ -36,6 +36,7 @@ from .const import (
 )
 from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, parse_madplan, retter
 from .notes import TYPE_ITEM, ShoppingNote, TextNote
+from . import kategorier as kat
 from . import planner as pl
 from .stats import History, normalize
 
@@ -341,14 +342,20 @@ class IndkobMadplanManager:
         key = normalize(text)
         if not key:
             return None
-        for ln in self.indkob.items():
+        items = self.indkob.items()
+        for ln in items:
             if normalize(ln["text"]) == key:
+                return ln
+        st = kat.stamme(key)  # "Banan" = "Bananer x3"
+        for ln in items:
+            if kat.stamme(normalize(ln["text"])) == st:
                 return ln
         return None
 
     @callback
-    def add_item(self, text: str, user: str | None = None, *, restore: bool = False, **kwargs: Any) -> dict:
-        if kwargs.get("auto_place") and not restore and (ex := self._existing(text)):
+    def add_item(self, text: str, user: str | None = None, *, restore: bool = False, dedupe: bool = False,
+                 **kwargs: Any) -> dict:
+        if (kwargs.get("auto_place") or dedupe) and not restore and (ex := self._existing(text)):
             # Varen står der allerede: fjern evt. fluebenet i stedet for at lave en dublet
             if ex["checked"]:
                 self.update_line(ex["id"], user, checked=False)
@@ -442,6 +449,24 @@ class IndkobMadplanManager:
         if names:
             self._log(user, "indkob", "slettede " + _names(names))
         self.indkob_changed(user)
+
+    @callback
+    def set_category(self, line_id: str, user: str | None = None, *, header_id: str | None = None,
+                     noegle: str | None = None) -> str | None:
+        """Flyt en vare til en anden kategori (læres til næste gang). Returnerer den nye overskrift."""
+        name = self.indkob.get(line_id)["text"].strip()
+        self.indkob.move_to_category(line_id, header_id=header_id, noegle=noegle)
+        header = self.indkob.category_of(line_id)
+        if name and header:
+            self._log(user, "indkob", f'flyttede "{name}" til {header}', key=f"mv:{line_id}")
+        self.indkob_changed(user)
+        return header
+
+    def category_of(self, line_id: str) -> str | None:
+        try:
+            return self.indkob.category_of(line_id)
+        except KeyError:
+            return None
 
     @callback
     def move_line(self, line_id: str, after_id: str | None, user: str | None = None) -> None:
@@ -743,6 +768,7 @@ class IndkobMadplanManager:
             "indkob": {
                 **{k: v for k, v in self.indkob.as_dict().items() if k != "categories"},
                 "kendte": self.known_names(),
+                "kategorier": self.indkob.category_overview(),
                 "tur": {
                     "aktiv": self.trip is not None,
                     "start": self.trip["start"] if self.trip else None,

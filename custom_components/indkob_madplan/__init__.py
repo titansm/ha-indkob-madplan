@@ -60,7 +60,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_subscribe, ws_state, ws_add, ws_update, ws_delete, ws_move,
         ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_madplan_retter, ws_settings_set, ws_stats_clear,
         ws_trip_update, ws_trip_add, ws_trip_delete,
-        ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej,
+        ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej, ws_indkob_kategori,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -170,16 +170,30 @@ def ws_state(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     vol.Optional("auto_place", default=False): bool,
     vol.Optional("checked", default=False): bool,
     vol.Optional("restore", default=False): bool,  # gendan en slettet linje (fortryd)
+    vol.Optional("dedupe", default=False): bool,  # står varen der allerede, bruges den i stedet
 })
 def ws_indkob__add(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    return m.add_item(
+    fandtes = (msg["auto_place"] or msg["dedupe"]) and not msg["restore"] and m._existing(msg["text"]) is not None
+    ln = m.add_item(
         msg["text"], user,
         restore=msg["restore"],
+        dedupe=msg["dedupe"],
         after_id=msg.get("after_id"),
         line_type=msg.get("line_type"),
         auto_place=msg["auto_place"],
         checked=msg["checked"],
     )
+    # "fandtes": varen stod der allerede (intet nyt blev tilføjet)
+    return {**ln, "kategori": m.category_of(ln["id"]), "fandtes": fandtes}
+
+
+@_ws({
+    vol.Required("line_id"): str,
+    vol.Optional("header_id"): vol.Any(str, None),
+    vol.Optional("noegle"): vol.Any(str, None),
+})
+def ws_indkob__kategori(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return {"kategori": m.set_category(msg["line_id"], user, header_id=msg.get("header_id"), noegle=msg.get("noegle"))}
 
 
 @_ws({
@@ -313,7 +327,7 @@ def ws_trip__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> Non
 # Navnene på handlerne bestemmer websocket-typen: ws_indkob__add -> indkob_madplan/indkob/add
 ws_add, ws_update, ws_delete, ws_move = ws_indkob__add, ws_indkob__update, ws_indkob__delete, ws_indkob__move
 ws_clear_checked, ws_uncheck_all, ws_madplan_set = ws_indkob__clear_checked, ws_indkob__uncheck_all, ws_madplan__set
-ws_madplan_retter = ws_madplan__retter
+ws_madplan_retter, ws_indkob_kategori = ws_madplan__retter, ws_indkob__kategori
 ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej = ws_madplan__indsaet, ws_madplan__skjul, ws_indkob__tilfoej
 ws_settings_set, ws_stats_clear = ws_settings__set, ws_stats__clear
 ws_trip_update, ws_trip_add, ws_trip_delete = ws_trip__update, ws_trip__add, ws_trip__delete
