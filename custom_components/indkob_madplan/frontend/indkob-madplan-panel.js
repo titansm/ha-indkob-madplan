@@ -1,12 +1,13 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
-  BASE_CSS, Checklist, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
+  BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.7.0";
-import "./im-planner.js?v=0.7.0";
+} from "./im-common.js?v=0.8.0";
+import "./im-planner.js?v=0.8.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
+  { id: "basis", title: "Basisliste" },
   { id: "madplan", title: "Madplan" },
   { id: "historik", title: "Indkøbshistorik" },
   { id: "stats", title: "Statistik" },
@@ -132,6 +133,25 @@ class IndkobMadplanPanel extends HTMLElement {
               <details class="hjaelp" id="hjaelp">
                 <summary>ⓘ Sådan virker indkøbslisten</summary>
                 <div id="hjaelp-body"></div>
+              </details>
+            </section>
+            <section id="v-basis" class="pane">
+              <h2 class="titel">Basisliste</h2>
+              <p class="meta" id="meta-basis"></p>
+              <p class="basis-intro">De faste varer. Efter hvert indkøb nulstilles indkøbslisten til denne liste: købte engangsvarer forsvinder, og faste varer, der mangler, kommer tilbage.</p>
+              <form class="hurtig" id="hurtig-basis" autocomplete="off">
+                <input id="ny-basis" type="text" enterkeyhint="done" placeholder="Tilføj fast vare …" aria-label="Tilføj fast vare" autocapitalize="sentences" />
+              </form>
+              <div class="forslag" id="af-basis"></div>
+              <div id="cl-basis"></div>
+              <button class="ny-linje" data-act="ny-linje-basis">Ny linje</button>
+              <details class="hjaelp" id="hjaelp-basis">
+                <summary>ⓘ Sådan virker basislisten</summary>
+                <div>
+                  <p><b>Basislisten er jeres faste indkøbsliste.</b> Når et indkøb er afsluttet (automatisk nogle timer efter sidste flueben eller med "Færdig med at handle"), nulstilles indkøbslisten til den: alle flueben fjernes, købte engangsvarer slettes, og faste varer, der er blevet slettet undervejs, sættes tilbage i deres kategori. Engangsvarer, der endnu ikke er købt, bliver stående.</p>
+                  <p><b>Rediger her</b> som på indkøbslisten: skriv i feltet øverst, brug ＋ under en kategori, træk i ≡, swipe for at slette. Flueben findes ikke her. Overskrifterne bestemmer, hvor varen lander, når den kommer tilbage på indkøbslisten.</p>
+                  <p><b>På indkøbslisten</b> er engangsvarer mærket <i>Engangs</i>. Tryk på mærket for at gøre varen fast, eller markér varen og tryk <i>Fast</i> i værktøjslinjen for at skifte. Nye varer (felt, kort, Assist, ugeplanlægger) er engangsvarer, indtil I gør dem faste.</p>
+                </div>
               </details>
             </section>
             <section id="v-madplan" class="pane">
@@ -260,19 +280,31 @@ class IndkobMadplanPanel extends HTMLElement {
         </main>
       </div>`;
     r.querySelector("[data-act=ny-linje]").hidden = this._shop;
+    const plusAdded = (res) => {
+      if (!res) this._setStatus("Kunne ikke tilføje");
+      else if (res.fandtes) this._toast(`"${res.text}" står allerede på listen`, { ms: 3500 });
+      else this._setStatus("Tilføjet");
+    };
     this._cl = new Checklist(r.getElementById("cl"), null, {
       editable: !this._shop,
       tapToggle: this._shop,
       hideChecked: this._hideChecked,
-      onFocusLine: (id) => (this._focusLine = id),
+      onFocusLine: (id) => { this._focusLine = id; this._focusNote = "indkob"; this._updateFastBtn(); },
       scroller: r.getElementById("ark"),
       onDelete: (ln, prevId) => this._deleted(ln, prevId),
       plus: true,
-      onPlusAdded: (res) => {
-        if (!res) this._setStatus("Kunne ikke tilføje");
-        else if (res.fandtes) this._toast(`"${res.text}" står allerede på listen`, { ms: 3500 });
-        else this._setStatus("Tilføjet");
-      },
+      onPlusAdded: plusAdded,
+      onFast: (ln) => this._setFast(ln, !ln.fast),
+    });
+    this._clb = new Checklist(r.getElementById("cl-basis"), null, {
+      editable: true,
+      checkbox: false,
+      swipe: true,
+      onFocusLine: (id) => { this._focusLine = id; this._focusNote = "basis"; },
+      scroller: r.getElementById("ark"),
+      onDelete: (ln, prevId) => this._deleted(ln, prevId, "basis"),
+      plus: true,
+      onPlusAdded: plusAdded,
     });
     r.addEventListener("click", (e) => this._click(e));
     r.getElementById("ba-form").addEventListener("submit", (e) => {
@@ -288,7 +320,9 @@ class IndkobMadplanPanel extends HTMLElement {
     });
     // Tryk uden for listen lukker en række, der står med "Slet" fremme
     r.addEventListener("pointerdown", (e) => {
-      if (!e.composedPath().includes(r.getElementById("cl"))) this._cl._closeOpen();
+      const path = e.composedPath();
+      if (!path.includes(r.getElementById("cl"))) this._cl._closeOpen();
+      if (!path.includes(r.getElementById("cl-basis"))) this._clb._closeOpen();
     });
     const ny = r.getElementById("ny");
     r.getElementById("hurtig").addEventListener("submit", (e) => {
@@ -298,6 +332,14 @@ class IndkobMadplanPanel extends HTMLElement {
       this._quickAdd(v);
     });
     ny.addEventListener("input", () => this._renderAutofill());
+    const nyb = r.getElementById("ny-basis");
+    r.getElementById("hurtig-basis").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const v = nyb.value.trim();
+      if (!v) return;
+      this._quickAdd(v, "basis");
+    });
+    nyb.addEventListener("input", () => this._renderAutofill());
     const ta = r.getElementById("mp");
     ta.addEventListener("input", () => {
       this._mpDirty = true;
@@ -332,6 +374,11 @@ class IndkobMadplanPanel extends HTMLElement {
     this._cl.setCategories(s.indkob.kategorier);
     this._cl.setBought(s.indkob.tur?.koebt);
     this._cl.setLines(s.indkob.lines);
+    this._clb.store = this._store.forNote("basis");
+    this._clb.setCategories(s.basis?.kategorier);
+    this._clb.setLines(s.basis?.lines);
+    this._renderBasis();
+    this._updateFastBtn();
     if (!this.shadowRoot.getElementById("katvalg").hidden) this._renderKatvalg();
     this._renderNoteList();
     this._renderIndkob();
@@ -382,6 +429,10 @@ class IndkobMadplanPanel extends HTMLElement {
         const left = s.indkob.lines.filter((l) => l.type === "item" && !l.checked && l.text.trim()).length;
         return `${relTime(s.indkob.updated)} · ${left ? left + " varer mangler" : "Alt er købt"}`;
       }
+      if (id === "basis") {
+        const n = s.basis?.antal || 0;
+        return `${n} ${n === 1 ? "fast vare" : "faste varer"}${s.basis?.updated ? " · ændret " + relTime(s.basis.updated) : ""}`;
+      }
       if (id === "madplan") {
         const d = (s.madplan.dage || []).find((x) => x.offset === 0);
         return `${relTime(s.madplan.updated)} · ${d?.ret ? "I aften: " + esc(d.ret) : "Intet planlagt i aften"}`;
@@ -414,13 +465,17 @@ class IndkobMadplanPanel extends HTMLElement {
     if (open === "indkob") {
       t.innerHTML = `
         <button class="vk shop" data-act="handl" aria-pressed="${this._shop}" title="Indkøbstilstand: tryk på varen for at krydse af">${this._shop ? "Rediger" : ICON_CART + "<span>Handl</span>"}</button>
-        ${this._shop ? "" : `<button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>`}
+        ${this._shop ? "" : `<button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>
+        <button class="vk fast-knap" data-act="fast" aria-pressed="false" title="Gør den markerede vare fast (i basislisten) eller engangs">${PIN}<span>Fast</span></button>`}
         <button class="vk" data-act="skjul" aria-pressed="${this._hideChecked}" title="Skjul afkrydsede">${this._hideChecked ? "Vis alle" : "Skjul købte"}</button>
         <button class="vk" data-act="mere" aria-haspopup="true" aria-label="Flere handlinger">${ICON_MORE}</button>
         <div class="menu-pop" id="pop" hidden>
           <button data-act="fjern-afkrydsede">Slet afkrydsede varer</button>
-          <button data-act="fjern-flueben">Færdig med at handle – fjern alle flueben</button>
+          <button data-act="fjern-flueben">Færdig med at handle – nulstil til basislisten</button>
         </div>`;
+      this._updateFastBtn();
+    } else if (open === "basis") {
+      t.innerHTML = `<button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>`;
     } else if (open === "madplan") {
       t.innerHTML = `<button class="vk" data-act="planlaeg" title="Forslag til næste uges madplan">Planlæg</button>
         <button class="vk" data-act="ny-uge" title="Indsæt en tom uge øverst">Ny uge</button>`;
@@ -565,42 +620,77 @@ class IndkobMadplanPanel extends HTMLElement {
     }
   }
 
+  /* ------------------------------------------------------------ basisliste */
+  _renderBasis() {
+    const s = this._state;
+    const b = s?.basis;
+    if (!b) return;
+    const n = b.antal || 0;
+    this.shadowRoot.getElementById("meta-basis").textContent =
+      `${n} ${n === 1 ? "fast vare" : "faste varer"}` +
+      (b.updated ? ` · ændret ${relTime(b.updated)}${b.updated_by ? " af " + b.updated_by : ""}` : "");
+  }
+
+  /* Knappen "Fast" i værktøjslinjen viser, om den markerede vare er fast. */
+  _updateFastBtn() {
+    const btn = this.shadowRoot?.querySelector(".fast-knap");
+    if (!btn) return;
+    const ln = this._focusNote === "indkob" ? this._state?.indkob.lines.find((l) => l.id === this._focusLine) : null;
+    const ok = !!ln && ln.type === "item" && !!ln.text.trim();
+    btn.disabled = !ok;
+    btn.setAttribute("aria-pressed", String(!!ln?.fast));
+    btn.title = !ok ? "Markér en vare først" : ln.fast ? "Fast vare – tryk for at gøre den til engangsvare" : "Engangsvare – tryk for at gøre den fast";
+  }
+
+  async _setFast(ln, fast, { undo = true } = {}) {
+    try {
+      await this._store.setFast(ln.id, fast);
+      const navn = ln.text.trim();
+      this._toast(fast ? `"${navn}" er nu en fast vare` : `"${navn}" er nu en engangsvare`,
+        undo ? { label: "Fortryd", action: () => this._setFast(ln, !fast, { undo: false }) } : { ms: 3500 });
+    } catch (err) {
+      this._setStatus(err?.message || "Kunne ikke ændre varen");
+    }
+  }
+
   _renderAutofill() {
     const r = this.shadowRoot;
     const s = this._state;
     r.getElementById("af").innerHTML = s ? autofillHTML(s.indkob.kendte, r.getElementById("ny").value, s.indkob.lines) : "";
+    r.getElementById("af-basis").innerHTML = s ? autofillHTML(s.indkob.kendte, r.getElementById("ny-basis").value, s.basis?.lines || []) : "";
   }
 
-  async _quickAdd(text) {
+  async _quickAdd(text, note = "indkob") {
     const r = this.shadowRoot;
-    const inp = r.getElementById("ny");
+    const inp = r.getElementById(note === "basis" ? "ny-basis" : "ny");
     inp.value = "";
     this._renderAutofill();
     try {
-      const res = await this._store.add(text, { auto_place: true, line_type: "item" });
-      this._added(res);
+      const res = await this._store.forNote(note).add(text, { auto_place: true, line_type: "item" });
+      this._added(res, note);
     } catch (err) {
-      this._setStatus("Kunne ikke tilføje");
+      this._setStatus(err?.message || "Kunne ikke tilføje");
     }
   }
 
-  /* Efter automatisk placering: vis hvor varen landede + "Skift" */
-  _added(res) {
+  /* Efter automatisk placering: vis hvor varen landede + "Skift" (+ "Fast" på indkøbslisten) */
+  _added(res, note = "indkob") {
     const kat = res.kategori ? prettyHeader(res.kategori) : "";
+    const cl = note === "basis" ? this._clb : this._cl;
     if (res.fandtes) {
-      this._cl.flash(res.id);
-      this._toast(`"${res.text}" står allerede på listen${kat ? " · " + kat : ""}`, { ms: 4000 });
+      cl.flash(res.id);
+      this._toast(`"${res.text}" står allerede på ${note === "basis" ? "basislisten" : "listen"}${kat ? " · " + kat : ""}`, { ms: 4000 });
       return;
     }
-    this._toast(kat ? `${res.text} → ${kat}` : `${res.text} er tilføjet`, {
-      label: "Skift",
-      action: () => this._openKatvalg(res.id),
-    });
+    const actions = [{ label: "Skift", action: () => this._openKatvalg(res.id, note) }];
+    if (note === "indkob" && !res.fast) actions.push({ label: "Fast", action: () => this._setFast(res, true) });
+    this._toast(kat ? `${res.text} → ${kat}` : `${res.text} er tilføjet`, { actions, ms: 7000 });
   }
 
   /* ------------------------------------------------------------ kategorivælger */
-  _openKatvalg(lineId) {
+  _openKatvalg(lineId, note = "indkob") {
     this._katLine = lineId;
+    this._katNote = note;
     const el = this.shadowRoot.getElementById("katvalg");
     this._renderKatvalg();
     el.hidden = false;
@@ -613,14 +703,15 @@ class IndkobMadplanPanel extends HTMLElement {
 
   _renderKatvalg() {
     const s = this._state;
-    const lines = s?.indkob.lines || [];
+    const src = this._katNote === "basis" ? s?.basis : s?.indkob;
+    const lines = src?.lines || [];
     const idx = lines.findIndex((l) => l.id === this._katLine);
     if (idx < 0) return this._closeKatvalg();
     const ln = lines[idx];
     let cur = null;
     for (let j = idx; j >= 0; j--) if (lines[j].type === "header") { cur = lines[j].id; break; }
     this.shadowRoot.getElementById("kv-titel").textContent = `Flyt "${ln.text}" til`;
-    this.shadowRoot.getElementById("kv-liste").innerHTML = (s.indkob.kategorier || [])
+    this.shadowRoot.getElementById("kv-liste").innerHTML = (src.kategorier || [])
       .map((c) => `<button type="button" class="kv-k${c.id && c.id === cur ? " valgt" : ""}" data-act="kat-valg"
           ${c.id ? `data-id="${esc(c.id)}"` : `data-noegle="${esc(c.fast)}"`}>
           <span>${esc(prettyHeader(c.navn))}</span><span class="kv-n">${c.id === cur ? "✓" : c.varer || ""}</span></button>`)
@@ -629,14 +720,15 @@ class IndkobMadplanPanel extends HTMLElement {
 
   async _valgKategori(b) {
     const id = this._katLine;
+    const note = this._katNote || "indkob";
     this._closeKatvalg();
     if (!id) return;
     try {
       const res = await this._store.send("indkob/kategori", {
-        line_id: id, header_id: b.dataset.id || null, noegle: b.dataset.noegle || null,
+        line_id: id, header_id: b.dataset.id || null, noegle: b.dataset.noegle || null, note,
       });
       this._setStatus(res.kategori ? `Flyttet til ${prettyHeader(res.kategori)}` : "Flyttet");
-      this._cl.flash(id);
+      (note === "basis" ? this._clb : this._cl).flash(id);
     } catch (err) {
       this._setStatus("Kunne ikke flytte varen");
     }
@@ -652,19 +744,23 @@ class IndkobMadplanPanel extends HTMLElement {
   }
 
   /* Swipe-slet: vis "Fortryd" i nogle sekunder */
-  _deleted(ln, prevId) {
+  _deleted(ln, prevId, note = "indkob") {
     const navn = ln.text.trim();
-    this._toast(navn ? `Slettede "${navn}"` : "Linjen blev slettet", {
+    const store = this._store.forNote(note);
+    this._toast(navn ? `Slettede "${navn}"${note === "basis" ? " fra basislisten" : ""}` : "Linjen blev slettet", {
       label: "Fortryd",
-      action: () => this._store.restore(ln, prevId).catch(() => this._setStatus("Kunne ikke gendanne")),
+      action: () => store.restore(ln, prevId).catch(() => this._setStatus("Kunne ikke gendanne")),
     });
   }
 
-  _toast(text, { label = null, action = null, ms = 6000 } = {}) {
+  /* Besked nederst med 0–2 knapper: { label, action } eller { actions: [{ label, action }] } */
+  _toast(text, { label = null, action = null, actions = null, ms = 6000 } = {}) {
     const el = this.shadowRoot.getElementById("toast");
-    el.innerHTML = `<span>${esc(text)}</span>${label ? `<button type="button" data-act="toast-knap">${esc(label)}</button>` : ""}`;
+    const list = actions || (label ? [{ label, action }] : []);
+    el.innerHTML = `<span>${esc(text)}</span>` +
+      list.map((a, i) => `<button type="button" data-act="toast-knap" data-i="${i}">${esc(a.label)}</button>`).join("");
     el.hidden = false;
-    this._toastAction = action;
+    this._toastActions = list.map((a) => a.action);
     clearTimeout(this._toastTimer);
     this._toastTimer = setTimeout(() => (el.hidden = true), ms);
   }
@@ -676,13 +772,13 @@ class IndkobMadplanPanel extends HTMLElement {
     const pct = t.taerskel ?? 50;
     const tim = fmtTimer(t.timer ?? 3);
     this.shadowRoot.getElementById("hjaelp-body").innerHTML = `
-      <p><b>En fast liste.</b> Varerne bliver stående efter indkøb – det er kun fluebenene, der fjernes. Varer I ikke længere køber, sletter I bare.</p>
+      <p><b>Basislisten.</b> Efter hvert indkøb nulstilles listen til basislisten (Noter → <button class="link" data-note="basis">Basisliste</button>): fluebenene fjernes, købte engangsvarer forsvinder, og faste varer, der mangler, kommer tilbage. Engangsvarer er mærket <i>Engangs</i> – tryk på mærket for at gøre varen fast; <i>Fast</i> i værktøjslinjen skifter for den markerede vare.</p>
       <p><b>Kryds af, når varen ryger i kurven.</b> Hvert flueben tæller som et køb i statistikken. Fjerner du et flueben igen inden for 12 timer, regnes det som fortrudt.</p>
       <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
-      <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" fjerner fluebenene med det samme. "Slet afkrydsede varer" fjerner varerne helt fra listen.</p>
+      <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" nulstiller listen til basislisten med det samme. "Slet afkrydsede varer" fjerner de afkrydsede varer – faste varer kommer dog tilbage.</p>
       <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
       <p><b>Afslut indkøb i butik:</b> når I har betalt, så tryk på knappen nederst i listen, vælg butikken og skriv evt. beløbet. Varerne gemmes som købt i den butik og forsvinder fra listen, så kun det, der mangler, står tilbage. Handler I videre i en anden butik, gør I bare det samme dér – det er ikke et krav. ${tim[0].toUpperCase() + tim.slice(1)} efter sidste butik fjernes fluebenene. Glemmer I knappen, registreres indkøbet stadig automatisk (uden butik og pris).</p>
-      <p><b>Nye varer:</b> skriv i feltet øverst, så finder listen selv kategorien – den overskrift varen plejer at stå under, ellers et gæt ud fra navnet (mælk → Køl – mejeri, kyllingebryst → Køl – kød). Ved ukendte varer bliver det Ugevarer. Tryk på <i>Skift</i> i beskeden nederst, hvis den landede forkert – så huskes det til næste gang.</p>
+      <p><b>Nye varer</b> er engangsvarer (tryk <i>Fast</i> i beskeden, hvis de skal blive på listen): skriv i feltet øverst, så finder listen selv kategorien – den overskrift varen plejer at stå under, ellers et gæt ud fra navnet (mælk → Køl – mejeri, kyllingebryst → Køl – kød). Ved ukendte varer bliver det Ugevarer. Tryk på <i>Skift</i> i beskeden nederst, hvis den landede forkert – så huskes det til næste gang.</p>
       <p><b>＋ under en kategori</b> tilføjer en vare lige præcis dér. Enter giver plads til den næste. Kategorier uden varer vises ikke – de dukker op, så snart der kommer en vare i dem.</p>
       <p>Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
       <p><b>Slet en linje:</b> swipe den mod venstre (kort = vis Slet, langt = slet med det samme). Fortryd nederst på skærmen i et par sekunder. Backspace på en tom linje sletter den også.</p>
@@ -770,7 +866,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const el = this.shadowRoot.getElementById("log-liste");
     let lastDay = "";
     const dag = (iso) => new Date(iso).toLocaleDateString("da-DK", { weekday: "long", day: "numeric", month: "long" });
-    const NOTE = { indkob: "🛒", madplan: "🍽", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
+    const NOTE = { indkob: "🛒", basis: "📌", madplan: "🍽", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
     el.innerHTML = log.length
       ? log.map((l) => {
           const d = dag(l.t);
@@ -1048,10 +1144,19 @@ class IndkobMadplanPanel extends HTMLElement {
       await this._store.uncheckAll();
     } else if (act === "overskrift") {
       const id = this._focusLine;
-      const ln = this._state?.indkob.lines.find((l) => l.id === id);
+      const note = this._focusNote === "basis" ? "basis" : "indkob";
+      const ln = (note === "basis" ? this._state?.basis : this._state?.indkob)?.lines.find((l) => l.id === id);
       if (!ln) return;
-      await this._store.update(id, { line_type: ln.type === "header" ? "item" : "header" });
-      this._cl._focusSoon(id, "end");
+      await this._store.forNote(note).update(id, { line_type: ln.type === "header" ? "item" : "header" });
+      (note === "basis" ? this._clb : this._cl)._focusSoon(id, "end");
+    } else if (act === "fast") {
+      const ln = this._focusNote === "indkob" ? this._state?.indkob.lines.find((l) => l.id === this._focusLine) : null;
+      if (!ln || ln.type !== "item" || !ln.text.trim()) return this._setStatus("Markér en vare først");
+      this._setFast(ln, !ln.fast);
+    } else if (act === "ny-linje-basis") {
+      const last = this._state.basis.lines.at(-1);
+      const nl = await this._store.forNote("basis").add("", { after_id: last ? last.id : null, line_type: "item" });
+      this._clb._focusSoon(nl.id, 0);
     } else if (act === "ba-aabn") {
       this._openButik();
     } else if (act === "ba-ret") {
@@ -1106,8 +1211,9 @@ class IndkobMadplanPanel extends HTMLElement {
     } else if (act === "toast-knap") {
       r.getElementById("toast").hidden = true;
       clearTimeout(this._toastTimer);
-      this._toastAction?.();
-      this._toastAction = null;
+      const fn = this._toastActions?.[+b.dataset.i];
+      this._toastActions = null;
+      fn?.();
     } else if (act === "tur") {
       this._openTrip = this._openTrip === b.dataset.id ? null : b.dataset.id;
       this._renderHistorik(true);
@@ -1224,11 +1330,19 @@ const PANEL_CSS = `
   #cl { margin-top: 8px; }
   .meta.shop { color: var(--im-acc); font-weight: 600; }
   .vk.shop { display: inline-flex; align-items: center; gap: 4px; }
+  .vk.fast-knap { display: inline-flex; align-items: center; gap: 3px; }
+  .vk.fast-knap:disabled { opacity: .4; }
+  .basis-intro { font-size: 15px; line-height: 1.45; color: var(--im-dim); margin: 0 0 12px; }
+  #cl-basis { margin-top: 8px; }
+  #af-basis:not(:empty) { margin: 8px 0 0; }
+  #cl-basis[data-empty]::before { content: "Basislisten er tom. Skriv en fast vare ovenfor."; color: var(--im-dim); padding: 12px 0; }
   .vk.shop[aria-pressed="true"] { background: var(--im-acc); color: #fff; }
   .toast { position: absolute; left: 50%; bottom: calc(28px + var(--safe-area-inset-bottom, 0px)); transform: translateX(-50%);
-           display: flex; align-items: center; gap: 18px; max-width: calc(100% - 32px); padding: 12px 18px; border-radius: 14px;
+           display: flex; align-items: center; gap: 18px; width: max-content; max-width: calc(100% - 32px); box-sizing: border-box;
+           padding: 12px 18px; border-radius: 14px;
            background: #2b2b2e; color: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.3); z-index: 20; font-size: 15px; white-space: nowrap; }
-  .toast span { overflow: hidden; text-overflow: ellipsis; }
+  .toast span { overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .toast button { flex: none; }
   .katvalg { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.35); display: flex; align-items: flex-end; justify-content: center; }
   .katvalg[hidden] { display: none; }
   .kv-ark { width: 100%; max-width: 560px; max-height: 80vh; overflow: auto; box-sizing: border-box; background: var(--im-bg);

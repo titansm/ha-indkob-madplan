@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.7.0";
+export const VERSION = "0.8.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -180,6 +180,26 @@ class ImStore {
   clearStats() {
     return this.send("stats/clear", { bekraeft: true });
   }
+  /* Gør en vare på indkøbslisten fast (sæt i basislisten) eller engangs */
+  setFast(line_id, fast) {
+    return this.send("indkob/fast", { line_id, fast });
+  }
+  /* Samme kommandoer, men rettet mod basislisten (note: "basis") */
+  forNote(note) {
+    if (!note || note === "indkob") return this;
+    const s = this;
+    return {
+      note,
+      add: (text, opts = {}) => s.add(text, { ...opts, note }),
+      update: (id, changes) => s.update(id, { ...changes, note }),
+      remove: (ids) => s.send("indkob/delete", { line_ids: ids, note }),
+      move: (id, after_id) => s.send("indkob/move", { line_id: id, after_id, note }),
+      restore: (ln, prevId) => s.send("indkob/add", {
+        text: ln.text, after_id: prevId || "__top__", line_type: ln.type, checked: false, restore: true, note,
+      }),
+      send: (type, data = {}) => s.send(type, { ...data, note }),
+    };
+  }
 }
 
 const STORES = new WeakMap();
@@ -199,6 +219,7 @@ export class Checklist {
   constructor(container, store, {
     editable = true, hideChecked = false, onFocusLine = null, scroller = null,
     onDelete = null, tapToggle = false, swipe = null, plus = false, onPlusAdded = null,
+    checkbox = true, onFast = null,
   } = {}) {
     this.el = container;
     this.store = store;
@@ -212,6 +233,8 @@ export class Checklist {
     this.rows = new Map();
     this.plus = plus; // "+" under hver kategori (kun i redigering)
     this.onPlusAdded = onPlusAdded; // (svar fra indkob/add, tekst)
+    this.checkbox = checkbox; // false = ingen flueben (basislisten)
+    this.onFast = onFast; // (linje) -> tryk på "Engangs"-mærket (gør varen fast)
     this.plusRows = new Map(); // overskrift-id -> række
     this.fixed = new Set(); // id'er på faste kategorier (skjules når de er tomme)
     this.bought = new Map(); // linje-id -> butik (købt i en butik, der er afsluttet på turen)
@@ -227,6 +250,7 @@ export class Checklist {
     this._suppressClick = 0;
     this.el.classList.add("cl");
     this.el.classList.toggle("tap", tapToggle);
+    this.el.classList.toggle("nocheck", !checkbox);
     // Klik lige efter et swipe/træk må ikke blive til et tryk på rækken
     this.el.addEventListener("click", (e) => {
       if (Date.now() < this._suppressClick) {
@@ -710,11 +734,15 @@ export class Checklist {
     row.dataset.type = ln.type;
     let inner;
     if (ln.type === "item") {
-      inner = `<button class="chk" type="button" role="checkbox" aria-label="Afkryds"></button>` +
+      // Engangsvarer (ikke i basislisten) får et lille mærke – de forsvinder efter indkøb
+      const pin = this.onFast
+        ? `<button class="pin" type="button" aria-label="Engangsvare – forsvinder efter indkøb. Tryk for at gøre den fast" title="Engangsvare – tryk for at gøre den fast">Engangs</button>`
+        : `<span class="pin" aria-hidden="true" title="Engangsvare – forsvinder efter indkøb">Engangs</span>`;
+      inner = (this.checkbox ? `<button class="chk" type="button" role="checkbox" aria-label="Afkryds"></button>` : "") +
         (this.editable
-          ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />` +
+          ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />${pin}` +
             `<span class="grip" role="button" aria-label="Træk for at flytte varen" title="Træk for at flytte">${GRIP}</span>`
-          : `<span class="tx"></span>`);
+          : `<span class="tx"></span>${pin}`);
     } else if (ln.type === "header") {
       inner = this.editable
         ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Overskrift" />`
@@ -729,6 +757,8 @@ export class Checklist {
 
   _fillRow(row, ln) {
     row.classList.toggle("done", !!ln.checked);
+    row.classList.toggle("fast", !!ln.fast);
+    row.classList.toggle("engangs", ln.type === "item" && ln.fast === false && !!(ln.text || "").trim());
     const butik = ln.checked ? this.bought.get(ln.id) : null;
     row.classList.toggle("koebt", !!butik);
     if (butik) row.firstElementChild.dataset.butik = butik;
@@ -757,6 +787,13 @@ export class Checklist {
     const row = e.target.closest("[data-id]");
     if (!row) return;
     if (this.openRow) return this._closeOpen();
+    const pin = e.target.closest("button.pin");
+    if (pin) {
+      e.preventDefault();
+      const ln = this._line(row.dataset.id);
+      if (ln) this.onFast?.(ln);
+      return;
+    }
     const chk = e.target.closest(".chk");
     if (!chk && !(this.tapToggle && !this.editable && row.dataset.type === "item")) return;
     const id = row.dataset.id;
@@ -848,6 +885,7 @@ const REVEAL = 84; // bredde på "Slet" når rækken er swipet halvt
 const FULL = 0.55; // andel af rækkens bredde, der sletter med det samme
 
 const PLUS = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>`;
+export const PIN = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2Z"/></svg>`;
 const GRIP = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 8h16v1.8H4zm0 6.2h16V16H4z"/></svg>`;
 
 /* ------------------------------------------------------------------ madplan-visning */
@@ -1046,6 +1084,13 @@ export const BASE_CSS = `
   .ln.done .chk::after { content: ""; position: absolute; left: 7.5px; top: 3px; width: 6px; height: 11px;
          border: solid #fff; border-width: 0 2.2px 2.2px 0; transform: rotate(45deg); }
   .ln.done .tx { color: var(--im-dim); text-decoration: line-through; }
+  .ln .pin { display: none; flex: none; align-items: center; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+             padding: 3px 8px; border-radius: 10px; color: var(--im-dim); border: 1px dashed var(--im-dim); opacity: .8; }
+  .ln.engangs .pin { display: inline-flex; }
+  .ln.done .pin { opacity: .45; }
+  button.pin { cursor: pointer; }
+  button.pin:active { background: var(--im-bg2); }
+  .cl.nocheck .ln.item .inner { padding-left: 2px; }
   .ln.koebt .inner::after { content: attr(data-butik); order: 2; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
                             white-space: nowrap; font-size: 12px; color: var(--im-dim); padding: 2px 8px; border-radius: 10px; background: var(--im-bg2); }
   .ln.koebt .grip { order: 3; }
