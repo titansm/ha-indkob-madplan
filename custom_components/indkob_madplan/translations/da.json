@@ -114,7 +114,7 @@
       "fields": {
         "note": {
           "name": "Note",
-          "description": "indkob eller madplan."
+          "description": "indkob, basis (basislisten) eller madplan."
         },
         "tekst": {
           "name": "Tekst",
@@ -124,7 +124,7 @@
     },
     "eksporter": {
       "name": "Eksportér noter",
-      "description": "Returnerer begge noter som tekst."
+      "description": "Returnerer indkøbsliste, basisliste og madplan som tekst."
     },
     "tilfoej": {
       "name": "Tilføj varer",
