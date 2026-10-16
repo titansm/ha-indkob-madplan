@@ -134,7 +134,22 @@ class ShoppingNote:
                 ln["checked"] = False
         if checked is not None and ln["type"] == TYPE_ITEM:
             ln["checked"] = checked
+        if ln["type"] == TYPE_ITEM and not ln["text"].strip():
+            ln["checked"] = False  # en tom linje kan ikke være "købt"
         return ln
+
+    def sanitize(self) -> bool:
+        """Ryd op i gamle data (fx tomme varer med flueben). Returnerer True hvis noget blev rettet."""
+        changed = False
+        for ln in self.lines:
+            ln.setdefault("checked", False)
+            if ln["type"] != TYPE_ITEM and ln["checked"]:
+                ln["checked"] = False
+                changed = True
+            if ln["type"] == TYPE_ITEM and ln["checked"] and not (ln.get("text") or "").strip():
+                ln["checked"] = False
+                changed = True
+        return changed
 
     def delete(self, line_ids: list[str]) -> None:
         ids = set(line_ids)

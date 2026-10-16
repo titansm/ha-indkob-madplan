@@ -32,9 +32,9 @@ from .const import (
     STORAGE_VERSION,
     VERSION,
 )
-from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, parse_madplan
+from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, parse_madplan, retter
 from .notes import TYPE_ITEM, ShoppingNote, TextNote
-from .stats import History
+from .stats import History, normalize
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +138,8 @@ class IndkobMadplanManager:
         self.history = History(data.get("history"))
         self.trip = data.get("trip")
         self.log = data.get("log", [])
+        if self.indkob.sanitize():
+            _LOGGER.info("Indkøbslisten ryddet op (tomme linjer med flueben)")
         self._checked_count = self._count()[1]
         self._unsubs.append(
             async_track_time_change(self.hass, self._on_midnight, hour=0, minute=0, second=5)
@@ -321,19 +323,60 @@ class IndkobMadplanManager:
         self._notify()
         return n
 
+    def _existing(self, text: str) -> dict | None:
+        """Samme vare på listen i forvejen (listen er en fast liste – ingen dubletter)."""
+        key = normalize(text)
+        if not key:
+            return None
+        for ln in self.indkob.items():
+            if normalize(ln["text"]) == key:
+                return ln
+        return None
+
     @callback
-    def add_item(self, text: str, user: str | None = None, **kwargs: Any) -> dict:
+    def add_item(self, text: str, user: str | None = None, *, restore: bool = False, **kwargs: Any) -> dict:
+        if kwargs.get("auto_place") and not restore and (ex := self._existing(text)):
+            # Varen står der allerede: fjern evt. fluebenet i stedet for at lave en dublet
+            if ex["checked"]:
+                self.update_line(ex["id"], user, checked=False)
+            return ex
         line = self.indkob.add(text, **kwargs)
+        if restore and line["checked"] and self.history.snapshot is not None:
+            # Gendannet med flueben: købet er allerede talt – må ikke tælle igen.
+            self.history.snapshot[line["id"]] = {"s": line["text"], "st": "completed"}
         if text.strip():
-            self._log(user, "indkob", f'tilføjede "{text.strip()}"')
+            self._log(user, "indkob", f'{"gendannede" if restore else "tilføjede"} "{text.strip()}"')
         self.indkob_changed(user)
         return line
 
+    def known_names(self) -> list[str]:
+        """Varenavne til autofuldførelse: alt der står på listen nu + alt der er købt før."""
+        seen: dict[str, str] = {}
+        for ln in self.indkob.items():
+            seen.setdefault(ln["text"].strip().lower(), ln["text"].strip())
+        for name in self.history.names.values():
+            if name.strip():
+                seen.setdefault(name.strip().lower(), name.strip())
+        return sorted(seen.values(), key=str.lower)[:400]
+
     @callback
     def add_items_auto(self, texts: list[str], user: str | None = None) -> list[dict]:
-        lines = [self.indkob.add(t, line_type=TYPE_ITEM, auto_place=True) for t in texts if t.strip()]
+        lines, new = [], []
+        for t in texts:
+            if not t.strip():
+                continue
+            if ex := self._existing(t):
+                if ex["checked"]:
+                    self.indkob.update(ex["id"], checked=False)
+                    self._log(user, "indkob", f'satte "{ex["text"].strip()}" på listen igen')
+                lines.append(ex)
+                continue
+            ln = self.indkob.add(t, line_type=TYPE_ITEM, auto_place=True)
+            lines.append(ln)
+            new.append(ln)
+        if new:
+            self._log(user, "indkob", "tilføjede " + _names([ln["text"] for ln in new]))
         if lines:
-            self._log(user, "indkob", "tilføjede " + _names([ln["text"] for ln in lines]))
             self.indkob_changed(user)
         return lines
 
@@ -445,6 +488,20 @@ class IndkobMadplanManager:
     def frost_dag(self) -> dict | None:
         return self.dag(1 if self.frost_tomorrow else 0)
 
+    def sidste_dato(self) -> str | None:
+        """Sidste dato der er planlagt (bruges af "Ny uge", så den fortsætter hvor planen slap)."""
+        return max(self.madplan).isoformat() if self.madplan else None
+
+    def retter(self) -> dict:
+        """Alle retter fra historikken med antal og hvornår de sidst var på planen (til inspiration)."""
+        today = dt_util.now().date()
+        alle = [
+            {"dato": d.isoformat(), "ugedag": UGEDAGE[d.weekday()], "ret": dag.ret, "noter": dag.noter, "uge": dag.uge}
+            for d, dag in sorted(self.madplan.items(), reverse=True)
+            if dag.ret
+        ]
+        return {"version": self.madplan_note.version, "retter": retter(self.madplan, today, DEFAULT_REST_ORD), "dage": alle}
+
     # ------------------------------------------------------------ statistik
     async def async_clear_history(self) -> None:
         self.clear_history("Home Assistant")
@@ -499,6 +556,7 @@ class IndkobMadplanManager:
         return {
             "indkob": {
                 **{k: v for k, v in self.indkob.as_dict().items() if k != "categories"},
+                "kendte": self.known_names(),
                 "tur": {
                     "aktiv": self.trip is not None,
                     "start": self.trip["start"] if self.trip else None,
@@ -510,6 +568,7 @@ class IndkobMadplanManager:
             "madplan": {
                 **self.madplan_note.as_dict(),
                 "dage": self.uge(-1, 9),
+                "sidste_dato": self.sidste_dato(),
                 "frost_dag": "i morgen" if self.frost_tomorrow else "i dag",
             },
             "stats": {k: v for k, v in self.stats.items() if k != "varer"},

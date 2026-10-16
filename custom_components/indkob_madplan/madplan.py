@@ -174,6 +174,57 @@ def parse_madplan(text: str, today: date) -> dict[date, Dag]:
     return result
 
 
+_DISH_STRIP_RE = re.compile(
+    r"\(?\s*(husk\s+)?(stor|dobbelt)\s+portion\s*\)?|\bx\s*2\b|\(\s*\)|\?+$", re.IGNORECASE
+)
+
+
+def dish_key(ret: str) -> str:
+    """Nøgle til at genkende samme ret på tværs af uger: "Lasagne stor portion" -> "lasagne"."""
+    s = _DISH_STRIP_RE.sub(" ", (ret or "").lower())
+    s = re.sub(r"\s+", " ", s).strip(" .,-–")
+    return s
+
+
+def retter(madplan: dict[date, Dag], today: date, rest_ord: list[str] | None = None) -> list[dict]:
+    """Retter fra hele madplanen med antal gange og hvornår de sidst var på planen.
+
+    Rester ("... rest", "rester fra søndag") tæller ikke som en ret for sig, men
+    lægges til den ret de er rester af, hvis den kan genkendes.
+    """
+    rest = rest_ord if rest_ord is not None else DEFAULT_REST_ORD
+    rest_re = re.compile(r"\b(" + "|".join(re.escape(r.lower()) for r in rest) + r")\b", re.IGNORECASE)
+    out: dict[str, dict] = {}
+    for d in sorted(madplan):
+        dag = madplan[d]
+        if not dag.ret or d > today:
+            continue
+        key = dish_key(dag.ret)
+        if not key:
+            continue
+        is_rest = bool(rest_re.search(dag.ret))
+        if is_rest:
+            # "kylling i karry rest" -> tæl som "kylling i karry", ellers spring over
+            base = dish_key(rest_re.sub(" ", dag.ret))
+            base = re.sub(r"\b(fra|af)\s*$", "", base).strip(" .,-–")
+            if base in out:
+                out[base]["rest_gange"] += 1
+            continue
+        it = out.setdefault(key, {"navn": dag.ret, "key": key, "antal": 0, "rest_gange": 0, "sidst": None, "datoer": []})
+        it["antal"] += 1
+        it["sidst"] = d.isoformat()
+        it["navn"] = dag.ret  # nyeste stavemåde vinder
+        it["datoer"].append(d.isoformat())
+    result = []
+    for it in out.values():
+        last = date.fromisoformat(it["sidst"])
+        it["dage_siden"] = (today - last).days
+        it["datoer"] = it["datoer"][-6:]
+        result.append(it)
+    result.sort(key=lambda x: (-x["antal"], x["dage_siden"]))
+    return result
+
+
 def kraever_optoening(
     raw: str, koed_ord: list[str] | None = None, rest_ord: list[str] | None = None
 ) -> tuple[bool, list[str]]:

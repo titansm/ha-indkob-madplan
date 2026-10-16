@@ -57,7 +57,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     add_extra_js_url(hass, f"{URL_BASE}/{CARD_FILE}?v={VERSION}")
     for cmd in (
         ws_subscribe, ws_state, ws_add, ws_update, ws_delete, ws_move,
-        ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_settings_set, ws_stats_clear,
+        ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_madplan_retter, ws_settings_set, ws_stats_clear,
         ws_trip_update, ws_trip_add, ws_trip_delete,
     ):
         websocket_api.async_register_command(hass, cmd)
@@ -166,13 +166,17 @@ def ws_state(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     vol.Optional("after_id"): vol.Any(str, None),
     vol.Optional("line_type"): vol.In(LINE_TYPES),
     vol.Optional("auto_place", default=False): bool,
+    vol.Optional("checked", default=False): bool,
+    vol.Optional("restore", default=False): bool,  # gendan en slettet linje (fortryd)
 })
 def ws_indkob__add(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.add_item(
         msg["text"], user,
+        restore=msg["restore"],
         after_id=msg.get("after_id"),
         line_type=msg.get("line_type"),
         auto_place=msg["auto_place"],
+        checked=msg["checked"],
     )
 
 
@@ -210,6 +214,11 @@ def ws_indkob__uncheck_all(m: IndkobMadplanManager, msg: dict, user: str | None)
 def ws_madplan__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     m.set_madplan(msg["text"], msg.get("base_version"), user)
     return {"version": m.madplan_note.version}
+
+
+@_ws({})
+def ws_madplan__retter(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.retter()
 
 
 @_ws({
@@ -252,6 +261,7 @@ def ws_trip__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> Non
 # Navnene på handlerne bestemmer websocket-typen: ws_indkob__add -> indkob_madplan/indkob/add
 ws_add, ws_update, ws_delete, ws_move = ws_indkob__add, ws_indkob__update, ws_indkob__delete, ws_indkob__move
 ws_clear_checked, ws_uncheck_all, ws_madplan_set = ws_indkob__clear_checked, ws_indkob__uncheck_all, ws_madplan__set
+ws_madplan_retter = ws_madplan__retter
 ws_settings_set, ws_stats_clear = ws_settings__set, ws_stats__clear
 ws_trip_update, ws_trip_add, ws_trip_delete = ws_trip__update, ws_trip__add, ws_trip__delete
 

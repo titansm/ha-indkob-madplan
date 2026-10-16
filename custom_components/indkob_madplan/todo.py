@@ -13,7 +13,6 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import IndkobConfigEntry
 from .entity import IndkobEntity
-from .notes import TYPE_ITEM
 
 
 async def async_setup_entry(
@@ -44,12 +43,9 @@ class IndkobTodo(IndkobEntity, TodoListEntity):
         ]
 
     async def async_create_todo_item(self, item: TodoItem) -> None:
-        line = self.manager.indkob.add(item.summary or "", line_type=TYPE_ITEM, auto_place=True)
-        if item.status == TodoItemStatus.COMPLETED:
-            line["checked"] = True
-        if (item.summary or "").strip():
-            self.manager._log("Home Assistant", "indkob", f'tilføjede "{item.summary.strip()}"')
-        self.manager.indkob_changed("Home Assistant")
+        lines = self.manager.add_items_auto([item.summary or ""], "Home Assistant")
+        if lines and item.status == TodoItemStatus.COMPLETED:
+            self.manager.update_line(lines[0]["id"], "Home Assistant", checked=True)
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
         self.manager.update_line(
