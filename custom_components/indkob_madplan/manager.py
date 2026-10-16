@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -18,6 +19,7 @@ from .const import (
     CONF_EXTRA_KOED,
     CONF_FROST_DAY,
     CONF_IGNORE_KOED,
+    CONF_PLAN_KALENDER,
     CONF_TRIP_DELAY,
     CONF_TRIP_THRESHOLD,
     DEFAULT_TRIP_DELAY,
@@ -34,6 +36,7 @@ from .const import (
 )
 from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, parse_madplan, retter
 from .notes import TYPE_ITEM, ShoppingNote, TextNote
+from . import planner as pl
 from .stats import History, normalize
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +68,8 @@ class IndkobMadplanManager:
         self._checked_count = 0
         # Redigeringslog: [{"t", "bruger", "note", "tekst", "k"?}] – nyeste sidst
         self.log: list[dict] = []
+        # Ugeplanlæggeren: retter I ikke vil have foreslået igen
+        self.planner_data: dict[str, Any] = {"skjulte": []}
 
     # ------------------------------------------------------------ options
     @property
@@ -98,6 +103,9 @@ class IndkobMadplanManager:
             CONF_IGNORE_KOED: o.get(CONF_IGNORE_KOED, "") or "",
             CONF_TRIP_THRESHOLD: round(float(o.get(CONF_TRIP_THRESHOLD, DEFAULT_TRIP_THRESHOLD))),
             CONF_TRIP_DELAY: float(o.get(CONF_TRIP_DELAY, DEFAULT_TRIP_DELAY)),
+            CONF_PLAN_KALENDER: self.plan_kalender or "",
+            "kalendere": self._kalendere(),
+            "skjulte_retter": list(self.planner_data.get("skjulte", [])),
             "standard_koed_ord": DEFAULT_KOED_ORD,
             "rest_ord": DEFAULT_REST_ORD,
             "version": VERSION,
@@ -106,7 +114,7 @@ class IndkobMadplanManager:
     @callback
     def set_settings(self, changes: dict[str, Any], user: str | None = None) -> dict[str, Any]:
         """Gem ændrede indstillinger i integrationens options (uden genindlæsning)."""
-        keys = (CONF_FROST_DAY, CONF_EXTRA_KOED, CONF_IGNORE_KOED, CONF_TRIP_THRESHOLD, CONF_TRIP_DELAY)
+        keys = (CONF_FROST_DAY, CONF_EXTRA_KOED, CONF_IGNORE_KOED, CONF_TRIP_THRESHOLD, CONF_TRIP_DELAY, CONF_PLAN_KALENDER)
         before = self.settings()
         new = {k: self.opts.get(k) for k in keys if self.opts.get(k) is not None}
         new.update({k: v for k, v in changes.items() if k in keys})
@@ -117,6 +125,9 @@ class IndkobMadplanManager:
                     vis = f"{v} %"
                 elif k == CONF_TRIP_DELAY:
                     vis = f"{str(v).rstrip('0').rstrip('.').replace('.', ',')} t"
+                elif k == CONF_PLAN_KALENDER:
+                    st = self.hass.states.get(v) if v else None
+                    vis = (st.name if st else v) or "ingen"
                 self._log(user, "indstillinger", f'satte "{SETTING_LABELS[k]}" til {vis or "(tom)"}', key=f"set:{k}")
         self.hass.config_entries.async_update_entry(self.entry, options=new)
         return self.settings()
@@ -138,6 +149,7 @@ class IndkobMadplanManager:
         self.history = History(data.get("history"))
         self.trip = data.get("trip")
         self.log = data.get("log", [])
+        self.planner_data = {"skjulte": [], **(data.get("planner") or {})}
         if self.indkob.sanitize():
             _LOGGER.info("Indkøbslisten ryddet op (tomme linjer med flueben)")
         self._checked_count = self._count()[1]
@@ -165,6 +177,7 @@ class IndkobMadplanManager:
             "history": self.history.as_dict(),
             "trip": self.trip,
             "log": self.log,
+            "planner": self.planner_data,
         }
 
     def _save(self) -> None:
@@ -502,6 +515,179 @@ class IndkobMadplanManager:
         ]
         return {"version": self.madplan_note.version, "retter": retter(self.madplan, today, DEFAULT_REST_ORD), "dage": alle}
 
+    # ------------------------------------------------------------ ugeplanlægger
+    def _kalendere(self) -> list[dict]:
+        return sorted(
+            ({"entity_id": st.entity_id, "navn": st.name} for st in self.hass.states.async_all("calendar")),
+            key=lambda x: x["navn"].lower(),
+        )
+
+    @property
+    def plan_kalender(self) -> str | None:
+        """Kalenderen som ugeplanlæggeren kigger i (vagter, fodbold …).
+
+        Ikke valgt endnu -> en kalender der hedder noget med "fælles"/"famil", hvis den findes.
+        Valgt "ingen" -> tom streng.
+        """
+        v = self.opts.get(CONF_PLAN_KALENDER)
+        if v is not None:
+            return v or None
+        for k in self._kalendere():
+            if any(w in k["navn"].lower() for w in ("fælles", "faelles", "famil")):
+                return k["entity_id"]
+        return None
+
+    def _plan_start(self) -> date:
+        today = dt_util.now().date()
+        planlagt = [d for d, dag in self.madplan.items() if dag.ret]
+        if planlagt:
+            nxt = max(planlagt) + timedelta(days=1)
+            if nxt > today:
+                return nxt
+        return today
+
+    async def _kalender_events(self, start: date, slut: date) -> list[dict]:
+        entity = self.plan_kalender
+        if not entity or self.hass.states.get(entity) is None:
+            return []
+        tz = dt_util.get_default_time_zone()
+        try:
+            resp = await self.hass.services.async_call(
+                "calendar", "get_events",
+                {
+                    "entity_id": entity,
+                    "start_date_time": datetime.combine(start, datetime.min.time(), tz).isoformat(),
+                    "end_date_time": datetime.combine(slut + timedelta(days=1), datetime.min.time(), tz).isoformat(),
+                },
+                blocking=True, return_response=True,
+            )
+        except Exception:  # noqa: BLE001 – kalenderen er en bonus, ikke et krav
+            _LOGGER.debug("Kunne ikke hente kalenderen %s", entity, exc_info=True)
+            return []
+        events = (resp or {}).get(entity, {}).get("events", []) if isinstance(resp, dict) else []
+        out = []
+        for ev in events:
+            s, e = ev.get("start"), ev.get("end")
+            # Tidspunkter til lokal tid, så "aften" vurderes rigtigt
+            if isinstance(s, str) and "T" in s:
+                s = dt_util.as_local(dt_util.parse_datetime(s)).isoformat()
+            if isinstance(e, str) and "T" in e:
+                e = dt_util.as_local(dt_util.parse_datetime(e)).isoformat()
+            out.append({"start": s, "end": e, "summary": ev.get("summary", "")})
+        return out
+
+    async def async_planlaeg(
+        self, *, start: date | None = None, dage: int | None = None, tags: dict[str, list[str]] | None = None,
+        laaste: dict[str, str] | None = None, seed: int | None = None, nye: int = 1, rester: bool = True,
+    ) -> dict:
+        """Forslag til næste uges madplan (se planner.py)."""
+        today = dt_util.now().date()
+        start = start or self._plan_start()
+        model = pl.byg_model(self.madplan, today, foer=start)
+        dage = max(3, min(14, dage or model.blok_laengde))
+        slut = start + timedelta(days=dage - 1)
+        events = await self._kalender_events(start, slut)
+        tags = tags or {}
+        laaste = laaste or {}
+        plan: list[pl.DagPlan] = []
+        for i in range(dage):
+            d = start + timedelta(days=i)
+            kal_tags, vis = pl.kalender_tags(events, d)
+            auto = kal_tags | set(model.vane_tags.get(d.weekday(), []))
+            eks = self.madplan.get(d)
+            if eks and eks.ret:
+                auto |= pl.tags_fra_noter(eks.noter, eks.raw)
+            iso = d.isoformat()
+            dp = pl.DagPlan(d, set(tags[iso]) if iso in tags else set(auto), kalender=vis, auto_tags=auto)
+            if iso in laaste:
+                dp.laast, dp.tekst = True, laaste[iso]
+            elif eks and eks.ret and iso not in tags:
+                dp.laast, dp.tekst, dp.eksisterende = True, eks.ret, True
+            plan.append(dp)
+        seed = seed if seed is not None else int(dt_util.now().timestamp())
+        pl.Planlaegger(model, skjulte=set(self.planner_data.get("skjulte", [])), seed=seed).planlaeg(
+            plan, antal_nye=max(0, min(2, nye)), rester=rester
+        )
+        return self._plan_svar(model, plan, start, dage, seed)
+
+    def _valg_dict(self, model: pl.Model, v: pl.Valg | None) -> dict | None:
+        if v is None:
+            return None
+        navn = v.rest_af or v.navn
+        egen = pl.egenskaber(navn)
+        prof = model.profiler.get(v.ligner or navn)
+        varianter = []
+        if prof and not v.nyt and not v.rest_af:
+            # Kun varianter med fyld/tilbehør ("pita m hakkebøffer"), ikke stavemåder
+            varianter = [k for k, _ in sorted(prof.varianter.items(), key=lambda kv: -kv[1])
+                         if k.lower() != navn.lower() and len(k) <= 34
+                         and re.search(r"\b(m|med)\b\.?", k, re.IGNORECASE)][:3]
+        return {
+            "navn": v.navn, "rest_af": v.rest_af, "nyt": v.nyt, "ligner": v.ligner, "stor": v.stor,
+            "grunde": v.grunde, "score": round(v.score, 3),
+            "protein": egen["protein"], "base": egen["base"], "effort": egen["effort"],
+            "varer": [] if v.rest_af else egen.get("varer", []),
+            "antal": prof.antal if prof and not v.nyt else 0,
+            "varianter": varianter,
+            "tekst": pl.ret_til_madplan(v.navn),
+        }
+
+    def _plan_svar(self, model: pl.Model, plan: list[pl.DagPlan], start: date, dage: int, seed: int) -> dict:
+        top = sorted(model.profiler.values(), key=lambda p: -p.vaegt)[:5]
+        uger = sorted({a.dato.isocalendar()[:2] for a in model.aftener})
+        return {
+            "start": start.isoformat(), "dage": dage, "seed": seed, "uge": start.isocalendar()[1],
+            "kalender": self.plan_kalender,
+            "standard_dage": model.blok_laengde,
+            "grundlag": {
+                "aftener": model.middage, "uger": len(uger),
+                "top": [{"navn": p.navn, "antal": p.antal} for p in top],
+            },
+            "tags": {k: {"label": v[0], "travl": v[1], "note": model.note_tekst.get(k, v[2])} for k, v in pl.TAGS.items()},
+            "retter": [p.navn for p in sorted(model.profiler.values(), key=lambda p: (-p.antal, p.navn))],
+            "plan": [
+                {
+                    "dato": d.dato.isoformat(), "ugedag": UGEDAGE[d.dato.weekday()],
+                    "tags": sorted(d.tags), "auto_tags": sorted(d.auto_tags), "kalender": d.kalender,
+                    "laast": d.laast, "eksisterende": d.eksisterende, "tekst": d.tekst,
+                    "valg": self._valg_dict(model, d.valg),
+                    "alternativer": [self._valg_dict(model, a) for a in d.alternativer],
+                }
+                for d in plan
+            ],
+        }
+
+    @callback
+    def indsaet_uge(self, linjer: list[dict], base_version: int | None = None, user: str | None = None) -> dict:
+        """Skriv den færdige uge øverst i madplanen ("Uge NN" + én linje pr. dag)."""
+        dage = sorted(
+            ((date.fromisoformat(x["dato"]), (x.get("linje") or "").strip()) for x in linjer),
+            key=lambda t: t[0],
+        )
+        if not dage:
+            return {"version": self.madplan_note.version}
+        tekst = []
+        for d, ln in dage:
+            # Linjen kommer fra panelet; sikr at den starter med den rigtige ugedag
+            body = ln.split(":", 1)[1].strip() if ":" in ln[:10] else ln
+            tekst.append(f"{UGEDAGE[d.weekday()]}: {body}".rstrip())
+        blok = f"Uge {dage[0][0].isocalendar()[1]}\n" + "\n".join(tekst)
+        gammel = self.madplan_note.text.strip()
+        self.set_madplan(blok + ("\n\n" + gammel if gammel else "") + "\n", base_version, user)
+        self._log(user, "madplan", f"planlagde uge {dage[0][0].isocalendar()[1]} med ugeplanlæggeren", key="madplan:plan")
+        return {"version": self.madplan_note.version}
+
+    @callback
+    def skjul_ret(self, navn: str, skjul: bool = True, user: str | None = None) -> list[str]:
+        sk = [s for s in self.planner_data.get("skjulte", []) if s.lower() != navn.lower()]
+        if skjul:
+            sk.append(navn)
+        self.planner_data["skjulte"] = sk
+        self._log(user, "madplan", f'{"skjulte" if skjul else "viste igen"} "{navn}" i ugeplanlæggeren')
+        self._save()
+        self._notify()
+        return sk
+
     # ------------------------------------------------------------ statistik
     async def async_clear_history(self) -> None:
         self.clear_history("Home Assistant")
@@ -579,6 +765,7 @@ class IndkobMadplanManager:
 
 
 SETTING_LABELS = {
+    CONF_PLAN_KALENDER: "Kalender til madplanen",
     CONF_TRIP_THRESHOLD: "Handlet ind ved",
     CONF_TRIP_DELAY: "Fjern flueben efter",
     CONF_FROST_DAY: "Optøning gælder",

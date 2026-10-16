@@ -23,6 +23,7 @@ from .const import (
     CONF_EXTRA_KOED,
     CONF_FROST_DAY,
     CONF_IGNORE_KOED,
+    CONF_PLAN_KALENDER,
     CONF_TRIP_DELAY,
     CONF_TRIP_THRESHOLD,
     DOMAIN,
@@ -59,6 +60,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_subscribe, ws_state, ws_add, ws_update, ws_delete, ws_move,
         ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_madplan_retter, ws_settings_set, ws_stats_clear,
         ws_trip_update, ws_trip_add, ws_trip_delete,
+        ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -221,7 +223,57 @@ def ws_madplan__retter(m: IndkobMadplanManager, msg: dict, user: str | None) -> 
     return m.retter()
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/madplan/planlaeg",
+    vol.Optional("start"): vol.Any(cv.date, None),
+    vol.Optional("dage"): vol.Any(vol.All(vol.Coerce(int), vol.Range(min=3, max=14)), None),
+    vol.Optional("tags"): {cv.string: [cv.string]},
+    vol.Optional("laaste"): {cv.string: cv.string},
+    vol.Optional("seed"): vol.Any(int, None),
+    vol.Optional("nye", default=1): vol.All(vol.Coerce(int), vol.Range(min=0, max=2)),
+    vol.Optional("rester", default=True): bool,
+})
+@websocket_api.async_response
+async def ws_madplan_planlaeg(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Forslag til næste uges madplan (ugeplanlæggeren)."""
+    try:
+        m = _manager(hass)
+    except ServiceValidationError as err:
+        connection.send_error(msg["id"], "not_configured", str(err))
+        return
+    try:
+        result = await m.async_planlaeg(
+            start=msg.get("start"), dage=msg.get("dage"), tags=msg.get("tags"), laaste=msg.get("laaste"),
+            seed=msg.get("seed"), nye=msg["nye"], rester=msg["rester"],
+        )
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.exception("Ugeplanlæggeren fejlede")
+        connection.send_error(msg["id"], "planner_error", str(err))
+        return
+    connection.send_result(msg["id"], result)
+
+
 @_ws({
+    vol.Required("linjer"): [{vol.Required("dato"): cv.string, vol.Required("linje"): vol.All(str, vol.Length(max=300))}],
+    vol.Optional("base_version"): vol.Any(int, None),
+})
+def ws_madplan__indsaet(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.indsaet_uge(msg["linjer"], msg.get("base_version"), user)
+
+
+@_ws({vol.Required("navn"): vol.All(str, vol.Length(min=1, max=120)), vol.Optional("skjul", default=True): bool})
+def ws_madplan__skjul(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return {"skjulte": m.skjul_ret(msg["navn"], msg["skjul"], user)}
+
+
+@_ws({vol.Required("varer"): [vol.All(str, vol.Length(max=120))]})
+def ws_indkob__tilfoej(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    lines = m.add_items_auto(msg["varer"], user)
+    return {"tilfoejet": [ln["text"] for ln in lines]}
+
+
+@_ws({
+    vol.Optional(CONF_PLAN_KALENDER): vol.All(str, vol.Length(max=255)),
     vol.Optional(CONF_FROST_DAY): vol.In([FROST_TODAY, FROST_TOMORROW]),
     vol.Optional(CONF_EXTRA_KOED): vol.All(str, vol.Length(max=1000)),
     vol.Optional(CONF_IGNORE_KOED): vol.All(str, vol.Length(max=1000)),
@@ -262,6 +314,7 @@ def ws_trip__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> Non
 ws_add, ws_update, ws_delete, ws_move = ws_indkob__add, ws_indkob__update, ws_indkob__delete, ws_indkob__move
 ws_clear_checked, ws_uncheck_all, ws_madplan_set = ws_indkob__clear_checked, ws_indkob__uncheck_all, ws_madplan__set
 ws_madplan_retter = ws_madplan__retter
+ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej = ws_madplan__indsaet, ws_madplan__skjul, ws_indkob__tilfoej
 ws_settings_set, ws_stats_clear = ws_settings__set, ws_stats__clear
 ws_trip_update, ws_trip_add, ws_trip_delete = ws_trip__update, ws_trip__add, ws_trip__delete
 

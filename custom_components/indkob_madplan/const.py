@@ -1,12 +1,13 @@
 """Konstanter for Indkøb & Madplan."""
 
 DOMAIN = "indkob_madplan"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 CONF_FROST_DAY = "frost_day"
 CONF_EXTRA_KOED = "extra_koed_ord"
 CONF_IGNORE_KOED = "ignorer_ord"
 CONF_TRIP_THRESHOLD = "handlet_taerskel"  # % afkrydset før det regnes som handlet ind
+CONF_PLAN_KALENDER = "madplan_kalender"  # kalender til ugeplanlæggeren
 CONF_TRIP_DELAY = "handlet_timer"  # timer efter sidste flueben før fluebenene fjernes
 DEFAULT_TRIP_THRESHOLD = 50
 DEFAULT_TRIP_DELAY = 3.0

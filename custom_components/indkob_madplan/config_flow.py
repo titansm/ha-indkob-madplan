@@ -14,6 +14,7 @@ from .const import (
     CONF_EXTRA_KOED,
     CONF_FROST_DAY,
     CONF_IGNORE_KOED,
+    CONF_PLAN_KALENDER,
     CONF_TRIP_DELAY,
     CONF_TRIP_THRESHOLD,
     DEFAULT_TRIP_DELAY,
@@ -73,6 +74,8 @@ class IndkobMadplanConfigFlow(ConfigFlow, domain=DOMAIN):
 class IndkobMadplanOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            # Kalenderen vælges i panelet – bevar den, når resten gemmes her
+            keep = {k: v for k, v in self.config_entry.options.items() if k == CONF_PLAN_KALENDER}
+            return self.async_create_entry(data={**keep, **user_input})
         current = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_schema(current))
