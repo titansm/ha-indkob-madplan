@@ -29,6 +29,7 @@ from .const import (
     DOMAIN,
     FROST_TODAY,
     FROST_TOMORROW,
+    NOTE_BASIS,
     NOTE_INDKOB,
     NOTE_MADPLAN,
     PANEL_ELEMENT,
@@ -61,7 +62,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_madplan_retter, ws_settings_set, ws_stats_clear,
         ws_trip_update, ws_trip_add, ws_trip_delete,
         ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej, ws_indkob_kategori,
-        ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd,
+        ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd, ws_indkob__fast,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -111,6 +112,11 @@ def _manager(hass: HomeAssistant) -> IndkobMadplanManager:
 
 def _user(connection: websocket_api.ActiveConnection) -> str | None:
     return connection.user.name if connection.user else None
+
+
+# Hvilken tjekliste en kommando gælder: indkøbslisten (standard) eller basislisten
+NOTE_FIELD = {vol.Optional("note", default=NOTE_INDKOB): vol.In([NOTE_INDKOB, NOTE_BASIS])}
+TEXT = vol.All(str, vol.Length(max=200))
 
 
 # ---------------------------------------------------------------- websocket
@@ -168,56 +174,70 @@ def ws_state(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
 
 
 @_ws({
-    vol.Required("text"): str,
+    vol.Required("text"): TEXT,
     vol.Optional("after_id"): vol.Any(str, None),
     vol.Optional("line_type"): vol.In(LINE_TYPES),
     vol.Optional("auto_place", default=False): bool,
     vol.Optional("checked", default=False): bool,
     vol.Optional("restore", default=False): bool,  # gendan en slettet linje (fortryd)
     vol.Optional("dedupe", default=False): bool,  # står varen der allerede, bruges den i stedet
+    **NOTE_FIELD,
 })
 def ws_indkob__add(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    fandtes = (msg["auto_place"] or msg["dedupe"]) and not msg["restore"] and m._existing(msg["text"]) is not None
+    note = msg["note"]
+    ex = m._existing(msg["text"], note) if (msg["auto_place"] or msg["dedupe"]) and not msg["restore"] else None
     ln = m.add_item(
         msg["text"], user,
         restore=msg["restore"],
         dedupe=msg["dedupe"],
+        note=note,
         after_id=msg.get("after_id"),
         line_type=msg.get("line_type"),
         auto_place=msg["auto_place"],
         checked=msg["checked"],
     )
-    # "fandtes": varen stod der allerede (intet nyt blev tilføjet)
-    return {**ln, "kategori": m.category_of(ln["id"]), "fandtes": fandtes}
+    # "fandtes": varen stod der allerede (intet nyt blev tilføjet); "fast": står den i basislisten
+    return {**ln, "kategori": m.category_of(ln["id"], note), "fandtes": ex is not None,
+            "fast": note == NOTE_BASIS or m.is_fast(ln["text"])}
 
 
 @_ws({
     vol.Required("line_id"): str,
     vol.Optional("header_id"): vol.Any(str, None),
     vol.Optional("noegle"): vol.Any(str, None),
+    **NOTE_FIELD,
 })
 def ws_indkob__kategori(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    return {"kategori": m.set_category(msg["line_id"], user, header_id=msg.get("header_id"), noegle=msg.get("noegle"))}
+    return {"kategori": m.set_category(msg["line_id"], user, header_id=msg.get("header_id"), noegle=msg.get("noegle"),
+                                       note=msg["note"])}
 
 
 @_ws({
     vol.Required("line_id"): str,
-    vol.Optional("text"): str,
+    vol.Optional("text"): TEXT,
     vol.Optional("checked"): bool,
     vol.Optional("line_type"): vol.In(LINE_TYPES),
+    **NOTE_FIELD,
 })
 def ws_indkob__update(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    return m.update_line(msg["line_id"], user, text=msg.get("text"), checked=msg.get("checked"), line_type=msg.get("line_type"))
+    return m.update_line(msg["line_id"], user, text=msg.get("text"), checked=msg.get("checked"),
+                         line_type=msg.get("line_type"), note=msg["note"])
 
 
-@_ws({vol.Required("line_ids"): [str]})
+@_ws({vol.Required("line_ids"): [str], **NOTE_FIELD})
 def ws_indkob__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
-    m.delete_lines(msg["line_ids"], user)
+    m.delete_lines(msg["line_ids"], user, msg["note"])
 
 
-@_ws({vol.Required("line_id"): str, vol.Optional("after_id"): vol.Any(str, None)})
+@_ws({vol.Required("line_id"): str, vol.Optional("after_id"): vol.Any(str, None), **NOTE_FIELD})
 def ws_indkob__move(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
-    m.move_line(msg["line_id"], msg.get("after_id"), user)
+    m.move_line(msg["line_id"], msg.get("after_id"), user, msg["note"])
+
+
+@_ws({vol.Required("line_id"): str, vol.Required("fast"): bool})
+def ws_indkob__fast(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    """Gør en vare på indkøbslisten fast (i basislisten) eller engangs."""
+    return {"fast": m.set_fast(msg["line_id"], msg["fast"], user)}
 
 
 @_ws({})
@@ -230,7 +250,7 @@ def ws_indkob__uncheck_all(m: IndkobMadplanManager, msg: dict, user: str | None)
     m.finish_trip(user)
 
 
-@_ws({vol.Required("text"): str, vol.Optional("base_version"): vol.Any(int, None)})
+@_ws({vol.Required("text"): vol.All(str, vol.Length(max=200000)), vol.Optional("base_version"): vol.Any(int, None)})
 def ws_madplan__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     m.set_madplan(msg["text"], msg.get("base_version"), user)
     return {"version": m.madplan_note.version}
@@ -360,12 +380,15 @@ def _register_services(hass: HomeAssistant) -> None:
             m.indkob.import_text(call.data["tekst"])
             m.history.snapshot = None  # import er ny grundlinje, ikke køb
             m.indkob_changed("Import")
+        elif call.data["note"] == NOTE_BASIS:
+            m.basis.import_text(call.data["tekst"])
+            m.indkob_changed("Import", NOTE_BASIS)
         else:
             m.set_madplan(call.data["tekst"], user="Import")
 
     async def _export(call: ServiceCall) -> dict[str, Any]:
         m = _manager(hass)
-        return {"indkobsliste": m.indkob.as_text(), "madplan": m.madplan_note.text}
+        return {"indkobsliste": m.indkob.as_text(), "basisliste": m.basis.as_text(), "madplan": m.madplan_note.text}
 
     async def _add(call: ServiceCall) -> dict[str, Any]:
         lines = _manager(hass).add_items_auto(call.data["varer"], "Home Assistant")
@@ -392,7 +415,7 @@ def _register_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN, "importer", _import,
-        schema=vol.Schema({vol.Required("note"): vol.In([NOTE_INDKOB, NOTE_MADPLAN]), vol.Required("tekst"): cv.string}),
+        schema=vol.Schema({vol.Required("note"): vol.In([NOTE_INDKOB, NOTE_BASIS, NOTE_MADPLAN]), vol.Required("tekst"): cv.string}),
     )
     hass.services.async_register(DOMAIN, "eksporter", _export, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(

@@ -80,6 +80,33 @@ class ShoppingNote:
                 if key:
                     self.categories[key] = current
 
+    # ------------------------------------------------------------ opslag på navn
+    def find_item(self, text: str) -> dict | None:
+        """Samme vare på listen (normaliseret navn, også ental/flertal: "Banan" = "Bananer x3")."""
+        key = normalize(text)
+        if not key:
+            return None
+        items = self.items()
+        for ln in items:
+            if normalize(ln["text"]) == key:
+                return ln
+        st = K.stamme(key)
+        for ln in items:
+            if K.stamme(normalize(ln["text"])) == st:
+                return ln
+        return None
+
+    def copy_structure(self) -> ShoppingNote:
+        """Kopi med nye id'er og uden flueben (bruges til at starte basislisten fra listen)."""
+        note = ShoppingNote()
+        note.lines = [
+            {"id": new_id(), "text": ln["text"], "type": ln["type"], "checked": False}
+            for ln in self.lines
+        ]
+        note.categories = dict(self.categories)
+        note.learn_categories()
+        return note
+
     # ------------------------------------------------------------ ops
     def add(
         self,
@@ -183,6 +210,29 @@ class ShoppingNote:
 
     def _auto_position(self, text: str) -> int:
         return self.place(text)[0]
+
+    def add_under(self, text: str, header_text: str | None) -> dict:
+        """Tilføj en vare under en bestemt overskrift (tekst fra en anden note).
+
+        Findes overskriften som fast kategori, bruges/oprettes den på butikkens plads;
+        en egen overskrift findes på navnet eller oprettes sidst. Uden overskrift
+        placeres varen som ved automatisk placering.
+        """
+        if not header_text:
+            return self.add(text, line_type=TYPE_ITEM, auto_place=True)
+        idx = self._header_index(header_text)
+        if idx is None and (k := K.header_noegle(header_text)) is not None:
+            idx = self.ensure_category(k)
+        if idx is None:
+            pos = self._end_position()
+            new = [{"id": new_id(), "text": header_text, "type": TYPE_HEADER, "checked": False}]
+            if pos:
+                new.insert(0, {"id": new_id(), "text": "", "type": TYPE_BLANK, "checked": False})
+            self.lines[pos:pos] = new
+            idx = pos + len(new) - 1
+        line = {"id": new_id(), "text": text.strip(), "type": TYPE_ITEM, "checked": False}
+        self.lines.insert(self._group_end(idx), line)
+        return line
 
     def move_to_category(self, line_id: str, *, header_id: str | None = None, noegle: str | None = None) -> None:
         """Flyt en vare til sidst i en kategori (overskrift efter id eller fast nøgle)."""

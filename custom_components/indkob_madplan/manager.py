@@ -29,6 +29,7 @@ from .const import (
     EVENT_HANDLET_IND,
     FROST_TODAY,
     FROST_TOMORROW,
+    NOTE_BASIS,
     NOTE_INDKOB,
     NOTE_MADPLAN,
     SIGNAL_UPDATE,
@@ -59,6 +60,8 @@ class IndkobMadplanManager:
         self.entry = entry
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.indkob = ShoppingNote()
+        # Basislisten: de faste varer, som indkøbslisten nulstilles til efter hvert indkøb
+        self.basis = ShoppingNote()
         self.madplan_note = TextNote()
         self.history = History()
         self.madplan: dict[date, Dag] = {}
@@ -156,6 +159,18 @@ class IndkobMadplanManager:
         self.planner_data = {"skjulte": [], **(data.get("planner") or {})}
         if self.indkob.sanitize():
             _LOGGER.info("Indkøbslisten ryddet op (tomme linjer med flueben)")
+        if data.get(NOTE_BASIS) is None:
+            # Første start med basisliste (≤ 0.7.0): listen var en fast "master-liste",
+            # så den bliver udgangspunktet for basislisten.
+            self.basis = self.indkob.copy_structure()
+            self.basis.updated = dt_util.now().isoformat(timespec="seconds")
+            self.basis.updated_by = "Automatisk"
+            _LOGGER.info("Basislisten oprettet ud fra indkøbslisten (%s varer)", len(self.basis.items()))
+            self._log("Automatisk", "basis", f"oprettede basislisten ud fra indkøbslisten ({len(self.basis.items())} varer)")
+        else:
+            self.basis = ShoppingNote(data.get(NOTE_BASIS))
+            self.basis.sanitize()
+            self.basis.uncheck_all()
         self._checked_count = self._count()[1]
         self._unsubs.append(
             async_track_time_change(self.hass, self._on_midnight, hour=0, minute=0, second=5)
@@ -177,6 +192,7 @@ class IndkobMadplanManager:
     def _data(self) -> dict:
         return {
             NOTE_INDKOB: self.indkob.as_dict(),
+            NOTE_BASIS: self.basis.as_dict(),
             NOTE_MADPLAN: self.madplan_note.as_dict(),
             "history": self.history.as_dict(),
             "trip": self.trip,
@@ -253,19 +269,81 @@ class IndkobMadplanManager:
         if new:
             _LOGGER.debug("Indkøbshændelser: %s", new)
 
+    def _note(self, note: str | None) -> ShoppingNote:
+        """Den tjekliste en kommando gælder: indkøbslisten (standard) eller basislisten."""
+        if note == NOTE_BASIS:
+            return self.basis
+        if note in (None, NOTE_INDKOB):
+            return self.indkob
+        raise ValueError(f"Ukendt note: {note}")
+
     @callback
-    def indkob_changed(self, user: str | None = None) -> None:
-        """Kaldes efter hver ændring af indkøbslisten."""
-        n = self.indkob
+    def indkob_changed(self, user: str | None = None, note: str | None = None) -> None:
+        """Kaldes efter hver ændring af indkøbslisten (eller basislisten)."""
+        n = self._note(note)
         n.version += 1
         n.updated = dt_util.now().isoformat(timespec="seconds")
         n.updated_by = user
         n.learn_categories()
+        if n is self.basis:
+            n.uncheck_all()  # basislisten har ingen flueben
+            self._save()
+            self._notify()
+            return
         self._feed_history()
         self._track_trip()
         self.stats = self.history.compute(dt_util.now())
         self._save()
         self._notify()
+
+    # ------------------------------------------------------------ basisliste
+    def is_fast(self, text: str) -> bool:
+        """Står varen i basislisten (er den en fast vare)?"""
+        return self.basis.find_item(text) is not None
+
+    @callback
+    def set_fast(self, line_id: str, fast: bool, user: str | None = None) -> bool:
+        """Gør en vare på indkøbslisten fast (sæt den i basislisten) eller engangs (fjern den)."""
+        ln = self.indkob.get(line_id)
+        name = ln["text"].strip()
+        if ln["type"] != TYPE_ITEM or not name:
+            raise ValueError("Kun varer kan være faste")
+        ex = self.basis.find_item(name)
+        if fast and ex is None:
+            self.basis.add_under(name, self.indkob.category_of(line_id))
+            self._log(user, "basis", f'gjorde "{name}" til en fast vare')
+        elif not fast and ex is not None:
+            self.basis.delete([x["id"] for x in self.basis.items() if normalize(x["text"]) == normalize(ex["text"])])
+            self._log(user, "basis", f'fjernede "{name}" fra basislisten')
+        else:
+            return fast
+        self.indkob_changed(user, NOTE_BASIS)
+        return fast
+
+    def _reset_to_basis(self, user: str | None) -> tuple[int, int]:
+        """Nulstil listen til basislisten efter et indkøb.
+
+        Købte engangsvarer (afkrydsede, ikke i basislisten) slettes, alle flueben
+        fjernes, og faste varer der mangler sættes tilbage under deres kategori.
+        Ukøbte engangsvarer bliver stående. Returnerer (slettet, sat tilbage).
+        """
+        if not self.basis.items():
+            self.indkob.uncheck_all()
+            return 0, 0
+        slet = [ln for ln in self.indkob.items() if ln["checked"] and not self.is_fast(ln["text"])]
+        if slet:
+            self.indkob.delete([ln["id"] for ln in slet])
+        self.indkob.uncheck_all()
+        tilbage = []
+        for b in self.basis.items():
+            if self.indkob.find_item(b["text"]) is None:
+                header = self.indkob.learned_header(b["text"]) or self.basis.category_of(b["id"])
+                tilbage.append(self.indkob.add_under(b["text"], header))
+        if slet:
+            self._log(user, "indkob", f"fjernede {len(slet)} købte engangsvarer: " + _names([ln["text"] for ln in slet], 6))
+        if tilbage:
+            self._log(user, "indkob", f"satte {len(tilbage)} faste varer tilbage på listen: " + _names([ln["text"] for ln in tilbage], 6))
+        return len(slet), len(tilbage)
 
     # ------------------------------------------------------------ indkøbstur
     def _count(self) -> tuple[int, int]:
@@ -282,14 +360,22 @@ class IndkobMadplanManager:
             # Mindst én butik er afsluttet med knappen: turen annulleres ikke.
             # Varer, der får fjernet fluebenet, hører ikke længere til butikken.
             checked_lines = {ln["id"]: ln["text"] for ln in self.indkob.items() if ln["checked"]}
-            for st in self._stops():
+            for st in list(self._stops()):
                 keep = [i for i in st["line_ids"] if i in checked_lines]
-                if len(keep) != len(st["line_ids"]):
-                    st["line_ids"] = keep
-                    if b := self._stop_payment(st["id"]):
-                        b["varer"] = clean_names([checked_lines[i] for i in keep])
-                        tr = self._hist_trip()
-                        tr["varer"] = [n for x in tr["betalinger"] for n in x.get("varer", [])]
+                if len(keep) == len(st["line_ids"]):
+                    continue
+                if not keep:
+                    # Alle varer fra butikken fik fluebenet fjernet igen: butikken (og dens pris) udgår
+                    _LOGGER.debug("Butikken %s har ingen varer tilbage – fjernes fra turen", st["butik"])
+                    self.undo_store(st["id"], "Automatisk", _notify=False)
+                    continue
+                st["line_ids"] = keep
+                if b := self._stop_payment(st["id"]):
+                    b["varer"] = clean_names([checked_lines[i] for i in keep])
+                    tr = self._hist_trip()
+                    tr["varer"] = [n for x in tr["betalinger"] for n in x.get("varer", [])]
+            if not self._stops():
+                return self._track_trip()  # ingen butikker tilbage: tærsklen gælder igen
             if more:
                 self.trip["sidste_flueben"] = now
             return
@@ -338,17 +424,17 @@ class IndkobMadplanManager:
             )
         if delete:
             n = self.indkob.clear_checked()
+            if checked:
+                self._log(user, "indkob", f"slettede {len(checked)} afkrydsede varer: " + _names([ln['text'] for ln in checked], 6))
+            self._reset_to_basis(user)  # faste varer kommer altid tilbage
         else:
             n = len(checked)
-            for ln in self.indkob.lines:
-                ln["checked"] = False
-        if checked:
-            if auto:
-                self._log("Automatisk", "indkob", f"handlet ind – fluebenene ved {len(checked)} varer blev fjernet automatisk")
-            elif delete:
-                self._log(user, "indkob", f"slettede {len(checked)} afkrydsede varer: " + _names([ln['text'] for ln in checked], 6))
-            else:
-                self._log(user, "indkob", f"fjernede alle flueben ({len(checked)} varer)")
+            if checked:
+                if auto:
+                    self._log("Automatisk", "indkob", f"handlet ind – listen nulstilles automatisk ({len(checked)} varer var krydset af)")
+                else:
+                    self._log(user, "indkob", f"afsluttede indkøbet og nulstillede listen ({len(checked)} varer var krydset af)")
+            self._reset_to_basis("Automatisk" if auto else user)
         self.trip = None
         self._checked_count = 0
         n_ = self.indkob
@@ -441,7 +527,7 @@ class IndkobMadplanManager:
         return {"stop_id": stop_id, "butik": st["butik"], "beloeb": st["beloeb"]}
 
     @callback
-    def undo_store(self, stop_id: str, user: str | None = None) -> None:
+    def undo_store(self, stop_id: str, user: str | None = None, *, _notify: bool = True) -> None:
         """Fortryd "Afslut indkøb i butik" – varerne forbliver afkrydsede."""
         st = self._stop(stop_id)
         self._stops().remove(st)
@@ -451,46 +537,43 @@ class IndkobMadplanManager:
             if not tr["betalinger"]:
                 self.history.delete_trip(tr["id"])
                 self.trip.pop("hist_id", None)
-        self._log(user, "indkob", f"fortrød afslutningen af indkøbet i {st['butik']}")
+        if user == "Automatisk":
+            self._log(user, "indkob", f"indkøbet i {st['butik']} udgik – alle varerne fik fluebenet fjernet")
+        else:
+            self._log(user, "indkob", f"fortrød afslutningen af indkøbet i {st['butik']}")
+        if not _notify:
+            return  # kaldt fra _track_trip, som selv gør resten
         self._track_trip()  # uden butikker gælder tærsklen igen
         self._trips_changed()
 
-    def _existing(self, text: str) -> dict | None:
+    def _existing(self, text: str, note: str | None = None) -> dict | None:
         """Samme vare på listen i forvejen (listen er en fast liste – ingen dubletter)."""
-        key = normalize(text)
-        if not key:
-            return None
-        items = self.indkob.items()
-        for ln in items:
-            if normalize(ln["text"]) == key:
-                return ln
-        st = kat.stamme(key)  # "Banan" = "Bananer x3"
-        for ln in items:
-            if kat.stamme(normalize(ln["text"])) == st:
-                return ln
-        return None
+        return self._note(note).find_item(text)
 
     @callback
     def add_item(self, text: str, user: str | None = None, *, restore: bool = False, dedupe: bool = False,
-                 **kwargs: Any) -> dict:
-        if (kwargs.get("auto_place") or dedupe) and not restore and (ex := self._existing(text)):
+                 note: str | None = None, **kwargs: Any) -> dict:
+        n = self._note(note)
+        if (kwargs.get("auto_place") or dedupe) and not restore and (ex := n.find_item(text)):
             # Varen står der allerede: fjern evt. fluebenet i stedet for at lave en dublet
             if ex["checked"]:
-                self.update_line(ex["id"], user, checked=False)
+                self.update_line(ex["id"], user, checked=False, note=note)
             return ex
-        line = self.indkob.add(text, **kwargs)
+        if n is self.basis:
+            kwargs["checked"] = False
+        line = n.add(text, **kwargs)
         if restore and line["checked"] and self.history.snapshot is not None:
             # Gendannet med flueben: købet er allerede talt – må ikke tælle igen.
             self.history.snapshot[line["id"]] = {"s": line["text"], "st": "completed"}
         if text.strip():
-            self._log(user, "indkob", f'{"gendannede" if restore else "tilføjede"} "{text.strip()}"')
-        self.indkob_changed(user)
+            self._log(user, note or NOTE_INDKOB, f'{"gendannede" if restore else "tilføjede"} "{text.strip()}"')
+        self.indkob_changed(user, note)
         return line
 
     def known_names(self) -> list[str]:
         """Varenavne til autofuldførelse: alt der står på listen nu + alt der er købt før."""
         seen: dict[str, str] = {}
-        for ln in self.indkob.items():
+        for ln in self.indkob.items() + self.basis.items():
             seen.setdefault(ln["text"].strip().lower(), ln["text"].strip())
         for name in self.history.names.values():
             if name.strip():
@@ -520,13 +603,15 @@ class IndkobMadplanManager:
 
     @callback
     def update_line(self, line_id: str, user: str | None = None, *, text: str | None = None,
-                    checked: bool | None = None, line_type: str | None = None) -> dict:
-        old = dict(self.indkob.get(line_id))
-        ln = self.indkob.update(line_id, text=text, checked=checked, line_type=line_type)
+                    checked: bool | None = None, line_type: str | None = None, note: str | None = None) -> dict:
+        n = self._note(note)
+        nn = note or NOTE_INDKOB
+        old = dict(n.get(line_id))
+        ln = n.update(line_id, text=text, checked=checked if n is self.indkob else False, line_type=line_type)
         u = user or "Ukendt"
         name = (ln["text"].strip() or old["text"].strip())
         if ln["type"] == TYPE_ITEM and ln["checked"] != old["checked"] and name:
-            self._log(user, "indkob", f'krydsede "{name}" af' if ln["checked"] else f'fjernede fluebenet ved "{name}"',
+            self._log(user, nn, f'krydsede "{name}" af' if ln["checked"] else f'fjernede fluebenet ved "{name}"',
                       key=f"chk:{line_id}")
         if text is not None and text.strip() != old["text"].strip():
             key = f"txt:{line_id}"
@@ -536,63 +621,66 @@ class IndkobMadplanManager:
             if not fra and not ny:
                 pass
             elif not fra:
-                self._log(user, "indkob", f'tilføjede "{ny}"', key=key, window=300, fra="")
+                self._log(user, nn, f'tilføjede "{ny}"', key=key, window=300, fra="")
             elif not ny:
                 if last and not last["fra"]:
                     self.log.remove(last)  # tilføjet og tømt igen – intet at logge
                 else:
-                    self._log(user, "indkob", f'slettede "{fra}"', key=key, window=300, fra=fra)
+                    self._log(user, nn, f'slettede "{fra}"', key=key, window=300, fra=fra)
             elif fra != ny:
-                self._log(user, "indkob", f'rettede "{fra}" til "{ny}"', key=key, window=300, fra=fra)
+                self._log(user, nn, f'rettede "{fra}" til "{ny}"', key=key, window=300, fra=fra)
             elif last:
                 self.log.remove(last)  # rettet tilbage til det oprindelige
         if line_type is not None and line_type != old["type"] and name and ln["text"].strip():
             if line_type == "header":
-                self._log(user, "indkob", f'gjorde "{name}" til overskrift')
+                self._log(user, nn, f'gjorde "{name}" til overskrift')
             elif old["type"] == "header":
-                self._log(user, "indkob", f'gjorde "{name}" til vare')
-        self.indkob_changed(user)
+                self._log(user, nn, f'gjorde "{name}" til vare')
+        self.indkob_changed(user, note)
         return ln
 
     @callback
-    def delete_lines(self, line_ids: list[str], user: str | None = None) -> None:
+    def delete_lines(self, line_ids: list[str], user: str | None = None, note: str | None = None) -> None:
+        n = self._note(note)
         names = []
         for lid in line_ids:
             try:
-                if t := self.indkob.get(lid)["text"].strip():
+                if t := n.get(lid)["text"].strip():
                     names.append(t)
             except KeyError:
                 pass
-        self.indkob.delete(line_ids)
+        n.delete(line_ids)
         if names:
-            self._log(user, "indkob", "slettede " + _names(names))
-        self.indkob_changed(user)
+            self._log(user, note or NOTE_INDKOB, "slettede " + _names(names))
+        self.indkob_changed(user, note)
 
     @callback
     def set_category(self, line_id: str, user: str | None = None, *, header_id: str | None = None,
-                     noegle: str | None = None) -> str | None:
+                     noegle: str | None = None, note: str | None = None) -> str | None:
         """Flyt en vare til en anden kategori (læres til næste gang). Returnerer den nye overskrift."""
-        name = self.indkob.get(line_id)["text"].strip()
-        self.indkob.move_to_category(line_id, header_id=header_id, noegle=noegle)
-        header = self.indkob.category_of(line_id)
+        n = self._note(note)
+        name = n.get(line_id)["text"].strip()
+        n.move_to_category(line_id, header_id=header_id, noegle=noegle)
+        header = n.category_of(line_id)
         if name and header:
-            self._log(user, "indkob", f'flyttede "{name}" til {header}', key=f"mv:{line_id}")
-        self.indkob_changed(user)
+            self._log(user, note or NOTE_INDKOB, f'flyttede "{name}" til {header}', key=f"mv:{line_id}")
+        self.indkob_changed(user, note)
         return header
 
-    def category_of(self, line_id: str) -> str | None:
+    def category_of(self, line_id: str, note: str | None = None) -> str | None:
         try:
-            return self.indkob.category_of(line_id)
+            return self._note(note).category_of(line_id)
         except KeyError:
             return None
 
     @callback
-    def move_line(self, line_id: str, after_id: str | None, user: str | None = None) -> None:
-        name = self.indkob.get(line_id)["text"].strip()
-        self.indkob.move(line_id, after_id)
+    def move_line(self, line_id: str, after_id: str | None, user: str | None = None, note: str | None = None) -> None:
+        n = self._note(note)
+        name = n.get(line_id)["text"].strip()
+        n.move(line_id, after_id)
         if name:
-            self._log(user, "indkob", f'flyttede "{name}"', key=f"mv:{line_id}")
-        self.indkob_changed(user)
+            self._log(user, note or NOTE_INDKOB, f'flyttede "{name}"', key=f"mv:{line_id}")
+        self.indkob_changed(user, note)
 
     # ------------------------------------------------------------ madplan
     def _parse_madplan(self) -> None:
@@ -852,9 +940,19 @@ class IndkobMadplanManager:
         tr = self.history.get_trip(trip_id)
         old = tr.get("betalinger", [])
         new = _clean_payments(betalinger)
-        for i, b in enumerate(new):  # varer/butiks-id fra "Afslut indkøb i butik" bevares
-            if i < len(old):
-                b.update({k: old[i][k] for k in ("varer", "t", "stop") if k in old[i] and k not in b})
+        # varer/butiks-id fra "Afslut indkøb i butik" bevares: efter position når antallet er
+        # uændret, ellers efter butiksnavn (en fjernet række må ikke forskyde de andre)
+        rest = list(old)
+        for i, b in enumerate(new):
+            src = None
+            if len(new) == len(old):
+                src = old[i]
+            else:
+                src = next((o for o in rest if o.get("butik", "").lower() == b["butik"].lower() and b["butik"]), None)
+            if src is not None:
+                if src in rest:
+                    rest.remove(src)
+                b.update({k: src[k] for k in ("varer", "t", "stop") if k in src and k not in b})
         tr["betalinger"] = new
         if self.trip and self.trip.get("hist_id") == trip_id:
             keep = {b["stop"]: b for b in new if b.get("stop")}
@@ -895,9 +993,19 @@ class IndkobMadplanManager:
     # ------------------------------------------------------------ views
     def state(self) -> dict:
         """Alt hvad panel og kort skal bruge."""
+        basis_keys = {normalize(b["text"]) for b in self.basis.items()}
+        basis_stammer = {kat.stamme(k) for k in basis_keys}
+
+        def _fast(ln: dict) -> bool:
+            if ln["type"] != TYPE_ITEM:
+                return False
+            k = normalize(ln["text"])
+            return bool(k) and (k in basis_keys or kat.stamme(k) in basis_stammer)
+
         return {
             "indkob": {
-                **{k: v for k, v in self.indkob.as_dict().items() if k != "categories"},
+                **{k: v for k, v in self.indkob.as_dict().items() if k not in ("categories", "lines")},
+                "lines": [{**ln, "fast": _fast(ln)} for ln in self.indkob.lines],
                 "kendte": self.known_names(),
                 "kategorier": self.indkob.category_overview(),
                 "tur": {
@@ -913,6 +1021,11 @@ class IndkobMadplanManager:
                     ],
                     "koebt": self.bought(),
                 },
+            },
+            "basis": {
+                **{k: v for k, v in self.basis.as_dict().items() if k != "categories"},
+                "kategorier": self.basis.category_overview(),
+                "antal": len(self.basis.items()),
             },
             "madplan": {
                 **self.madplan_note.as_dict(),

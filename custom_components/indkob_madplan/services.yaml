@@ -4,7 +4,7 @@ importer:
       required: true
       selector:
         select:
-          options: [indkob, madplan]
+          options: [indkob, basis, madplan]
     tekst:
       required: true
       selector:

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from statistics import median
 
 _PAREN_RE = re.compile(r"\([^)]*\)")
-_UNIT = r"(?:x|stk\.?|kg|g|gr|l|dl|cl|ml|pk\.?|pakk?er?|pakke|bakk?er?|bakke|pos(?:er)?|ds\.?|dåser?|dåse|bdt\.?|bundter?|net|glas|rl\.?|ruller?)"
+_UNIT = r"(?:x|stk\.?|styks?|kg|kilo|g|gr|gram|l|liter|dl|cl|ml|pk\.?|pakk?er?|pakke|bakk?er?|bakke|pos(?:er)?|ds\.?|dåser?|dåse|bdt\.?|bundter?|net|glas|rl\.?|ruller?|flasker?|fl\.?)"
 _QTY_RE = re.compile(rf"\b\d+(?:[.,]\d+)?\s*{_UNIT}(?=\s|$)", re.IGNORECASE)
 _X_QTY_RE = re.compile(r"\bx\s*\d+\b|\b\d+\s*x\b", re.IGNORECASE)
 _LEAD_NUM_RE = re.compile(r"^\s*\d+(?:[.,]\d+)?\s+")

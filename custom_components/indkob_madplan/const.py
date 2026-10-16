@@ -1,7 +1,7 @@
 """Konstanter for Indkøb & Madplan."""
 
 DOMAIN = "indkob_madplan"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 CONF_FROST_DAY = "frost_day"
 CONF_EXTRA_KOED = "extra_koed_ord"
@@ -17,6 +17,7 @@ FROST_TOMORROW = "i_morgen"
 
 NOTE_INDKOB = "indkob"
 NOTE_MADPLAN = "madplan"
+NOTE_BASIS = "basis"  # basislisten: faste varer, som indkøbslisten nulstilles til
 
 SIGNAL_UPDATE = f"{DOMAIN}_update"
 EVENT_HANDLET_IND = f"{DOMAIN}_handlet_ind"
