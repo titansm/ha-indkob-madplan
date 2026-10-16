@@ -6,7 +6,7 @@
  *           forslag (true) – med kun_i_dag: "plejer I at købe"-knapper under feltet
  *           vis_i_morgen (false) – med kun_i_dag: også morgendagens ret
  */
-import * as C from "./im-common.js?v=0.5.0";
+import * as C from "./im-common.js?v=0.6.0";
 
 // Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
 C.resumeIfShopping();
@@ -188,8 +188,8 @@ class IndkobMadplanCard extends HTMLElement {
     const kvit = this.shadowRoot.getElementById("kvit");
     try {
       const ln = await this._store.add(text, { auto_place: true, line_type: "item" });
-      const was = this._state?.indkob.lines.find((l) => l.id === ln.id);
-      this._kvit(was && !was.checked ? `"${ln.text}" står allerede på listen` : `✓ ${ln.text} er tilføjet`);
+      const kat = ln.kategori ? " · " + C.prettyHeader(ln.kategori) : "";
+      this._kvit(ln.fandtes ? `"${ln.text}" står allerede på listen${kat}` : `✓ ${ln.text} er tilføjet${kat}`);
     } catch (err) {
       this._kvit("Kunne ikke tilføje");
     }

@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -198,7 +198,7 @@ export function getStore(hass) {
 export class Checklist {
   constructor(container, store, {
     editable = true, hideChecked = false, onFocusLine = null, scroller = null,
-    onDelete = null, tapToggle = false, swipe = null,
+    onDelete = null, tapToggle = false, swipe = null, plus = false, onPlusAdded = null,
   } = {}) {
     this.el = container;
     this.store = store;
@@ -210,6 +210,12 @@ export class Checklist {
     this.swipeEnabled = swipe ?? editable; // swipe til siden for at slette
     this.lines = [];
     this.rows = new Map();
+    this.plus = plus; // "+" under hver kategori (kun i redigering)
+    this.onPlusAdded = onPlusAdded; // (svar fra indkob/add, tekst)
+    this.plusRows = new Map(); // overskrift-id -> række
+    this.fixed = new Set(); // id'er på faste kategorier (skjules når de er tomme)
+    this._plusQueue = Promise.resolve();
+    this._plusLast = null; // {header, id}: seneste vare tilføjet via "+"
     this.dirty = new Map(); // id -> timer
     this.focusId = null;
     this.scroller = scroller;
@@ -231,13 +237,15 @@ export class Checklist {
     this.el.addEventListener("pointerdown", (e) => this._pointerDown(e));
     this.el.addEventListener("contextmenu", (e) => e.target.closest(".grip") && e.preventDefault());
     this.el.addEventListener("input", (e) => this._input(e));
-    this.el.addEventListener("keydown", (e) => this._key(e));
+    this.el.addEventListener("keydown", (e) => (e.target.closest("[data-plus]") ? this._plusKey(e) : this._key(e)));
     this.el.addEventListener("focusin", (e) => {
       const row = e.target.closest("[data-id]");
       this.focusId = row?.dataset.id || null;
       this.onFocusLine?.(this.focusId);
     });
     this.el.addEventListener("focusout", (e) => {
+      const plus = e.target.closest("[data-plus]");
+      if (plus) return this._plusBlur(e.target, plus.dataset.plus);
       const row = e.target.closest("[data-id]");
       if (row) this._flush(row.dataset.id);
     });
@@ -253,7 +261,14 @@ export class Checklist {
     this.el.classList.toggle("tap", tapToggle);
     for (const row of this.rows.values()) row.remove();
     this.rows.clear();
+    for (const row of this.plusRows.values()) row.remove();
+    this.plusRows.clear();
     this.render();
+  }
+
+  /* Faste kategorier (fra state.indkob.kategorier) – tomme skjules. */
+  setCategories(list) {
+    this.fixed = new Set((list || []).filter((c) => c.fast && c.id).map((c) => c.id));
   }
 
   setLines(lines) {
@@ -477,7 +492,7 @@ export class Checklist {
 
   _visibleSibling(row, dir) {
     let r = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
-    while (r && (r.hidden || r.classList.contains("drop"))) r = dir < 0 ? r.previousElementSibling : r.nextElementSibling;
+    while (r && (r.hidden || r.classList.contains("drop") || r.classList.contains("plus"))) r = dir < 0 ? r.previousElementSibling : r.nextElementSibling;
     return r;
   }
 
@@ -538,8 +553,8 @@ export class Checklist {
 
   render() {
     const seen = new Set();
-    let prev = null;
     let visibleItems = 0;
+    // 1) rækker for alle linjer
     for (const ln of this.lines) {
       seen.add(ln.id);
       let row = this.rows.get(ln.id);
@@ -552,10 +567,6 @@ export class Checklist {
       const hidden = ln.type === "item" && ln.checked && this.hideChecked;
       row.hidden = hidden || (!this.editable && ln.type === "blank");
       if (ln.type === "item" && !hidden) visibleItems++;
-      // placér i rækkefølge
-      const want = prev ? prev.nextSibling : this.el.firstChild;
-      if (want !== row) this.el.insertBefore(row, want);
-      prev = row;
     }
     for (const [id, row] of this.rows) {
       if (!seen.has(id)) {
@@ -564,22 +575,125 @@ export class Checklist {
         this.rows.delete(id);
       }
     }
-    // Skjul overskrifter uden synlige varer i kompakt visning
-    if (!this.editable) {
-      let header = null;
-      let count = 0;
-      const close = () => header && (header.hidden = count === 0);
-      for (const ln of this.lines) {
-        const row = this.rows.get(ln.id);
-        if (ln.type === "header") {
-          close();
-          header = row;
-          count = 0;
-        } else if (ln.type === "item" && !row.hidden) count++;
+    // 2) grupper: overskrift + linjerne under den
+    const groups = [];
+    let g = null;
+    for (const ln of this.lines) {
+      if (ln.type === "header") {
+        g = { header: ln, lines: [], items: 0, visible: 0, lastItem: null };
+        groups.push(g);
+      } else if (g) {
+        g.lines.push(ln);
+        if (ln.type === "item") {
+          g.items++;
+          g.lastItem = ln;
+          if (!this.rows.get(ln.id).hidden) g.visible++;
+        }
       }
-      close();
+    }
+    const plusAfter = new Map(); // linje-id -> overskrift-id ("+" sættes efter linjen)
+    for (const gr of groups) {
+      // Kategorier uden varer vises ikke (faste altid; i visning/indkøb alle)
+      const empty = this.editable ? (this.fixed.has(gr.header.id) && gr.items === 0) : gr.visible === 0;
+      if (empty) {
+        this.rows.get(gr.header.id).hidden = true;
+        for (const ln of gr.lines) this.rows.get(ln.id).hidden = true;
+      } else if (this.editable && this.plus) {
+        plusAfter.set((gr.lastItem || gr.header).id, gr.header.id);
+      }
+    }
+    // 3) "+"-rækker
+    const wantPlus = new Set(plusAfter.values());
+    for (const [hid, row] of this.plusRows) {
+      if (!wantPlus.has(hid)) {
+        row.remove();
+        this.plusRows.delete(hid);
+      }
+    }
+    for (const hid of wantPlus) {
+      if (!this.plusRows.has(hid)) this.plusRows.set(hid, this._makePlus(hid));
+      const h = this.lines.find((l) => l.id === hid);
+      this.plusRows.get(hid).querySelector("input").setAttribute("aria-label", `Tilføj vare under ${prettyHeader(h?.text || "")}`);
+    }
+    // 4) placér i rækkefølge (en række, der allerede står rigtigt, flyttes ikke – så fokus bevares)
+    let prev = null;
+    const place = (row) => {
+      const want = prev ? prev.nextSibling : this.el.firstChild;
+      if (want !== row) this.el.insertBefore(row, want);
+      prev = row;
+    };
+    for (const ln of this.lines) {
+      place(this.rows.get(ln.id));
+      const hid = plusAfter.get(ln.id);
+      if (hid) place(this.plusRows.get(hid));
     }
     this.el.toggleAttribute("data-empty", visibleItems === 0);
+  }
+
+  _makePlus(headerId) {
+    const row = document.createElement("div");
+    row.className = "ln plus";
+    row.dataset.plus = headerId;
+    row.innerHTML = `<div class="inner"><span class="pl" aria-hidden="true">${PLUS}</span>` +
+      `<input class="tx" type="text" enterkeyhint="next" autocapitalize="sentences" autocomplete="off" placeholder="Ny vare" /></div>`;
+    return row;
+  }
+
+  _plusKey(e) {
+    if (e.isComposing) return;
+    if (e.key === "Escape") return e.target.blur();
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const tx = e.target;
+    const text = tx.value.trim();
+    if (!text) return tx.blur();
+    tx.value = "";
+    this._plusAdd(tx.closest("[data-plus]").dataset.plus, text);
+  }
+
+  _plusBlur(tx, headerId) {
+    const text = tx.value.trim();
+    tx.value = "";
+    if (text) this._plusAdd(headerId, text);
+    this._plusLast = null;
+  }
+
+  /* Tilføj som sidste vare i kategorien – i kø, så hurtige Enter-tryk bevarer rækkefølgen. */
+  _plusAdd(headerId, text) {
+    this._plusQueue = this._plusQueue.then(async () => {
+      const ids = new Set(this.lines.map((l) => l.id));
+      let after = this._plusLast?.header === headerId ? this._plusLast.id : null;
+      if (!after) {
+        const i = this.lines.findIndex((l) => l.id === headerId);
+        if (i < 0) return;
+        after = headerId;
+        for (let j = i + 1; j < this.lines.length && this.lines[j].type !== "header"; j++) {
+          if (this.lines[j].type === "item") after = this.lines[j].id;
+        }
+      }
+      if (!ids.has(after) && after !== this._plusLast?.id) after = headerId;
+      try {
+        const res = await this.store.add(text, { after_id: after, line_type: "item", dedupe: true });
+        if (!res.fandtes) this._plusLast = { header: headerId, id: res.id };
+        else this.flash(res.id);
+        this.onPlusAdded?.(res, text);
+      } catch (err) {
+        this.onPlusAdded?.(null, text);
+      }
+    });
+  }
+
+  /* Fremhæv en række kort (fx en vare der allerede stod på listen). */
+  flash(id) {
+    const tick = (n) => {
+      const row = this.rows.get(id);
+      if (!row) return n < 10 && setTimeout(() => tick(n + 1), 60);
+      row.classList.remove("flash");
+      void row.offsetWidth;
+      row.classList.add("flash");
+      setTimeout(() => row.classList.remove("flash"), 1300);
+    };
+    tick(0);
   }
 
   _makeRow(ln) {
@@ -722,6 +836,7 @@ export class Checklist {
 const REVEAL = 84; // bredde på "Slet" når rækken er swipet halvt
 const FULL = 0.55; // andel af rækkens bredde, der sletter med det samme
 
+const PLUS = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>`;
 const GRIP = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 8h16v1.8H4zm0 6.2h16V16H4z"/></svg>`;
 
 /* ------------------------------------------------------------------ madplan-visning */
@@ -902,6 +1017,16 @@ export const BASE_CSS = `
             border: 0; padding: 10px 0; outline: none; overflow-wrap: anywhere; }
   .ln.blank input.tx { padding: 0; height: 14px; font-size: 14px; }
   .ln.blank input.tx:focus { height: 40px; }
+  .ln.plus .inner { min-height: 40px; cursor: text; }
+  .ln.plus .pl { flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+         color: var(--im-dim); opacity: .55; }
+  .ln.plus .tx { padding: 8px 0; font-size: 16px; }
+  .ln.plus .tx::placeholder { color: transparent; }
+  .ln.plus .tx:focus::placeholder { color: var(--im-dim); }
+  .ln.plus:focus-within .pl { opacity: 1; color: var(--im-acc-strong); }
+  .ln.plus:focus-within .inner { border-bottom: 1px solid var(--im-line); }
+  .ln.flash .inner { animation: im-flash 1.2s ease-out; }
+  @keyframes im-flash { 0%, 30% { background: var(--im-acc-soft, rgba(255, 196, 0, .28)); } 100% { background: var(--im-bg); } }
   .ln.header { margin-top: 14px; }
   .ln.header .tx { font-weight: 700; font-size: 19px; letter-spacing: -.01em; padding: 6px 0; }
   .chk { flex: none; width: 24px; height: 24px; border-radius: 50%; border: 1.6px solid var(--im-dim); position: relative;

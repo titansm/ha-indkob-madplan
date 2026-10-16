@@ -1,9 +1,9 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
   BASE_CSS, Checklist, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
-  nyUgeSkabelon, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.5.0";
-import "./im-planner.js?v=0.5.0";
+  nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
+} from "./im-common.js?v=0.6.0";
+import "./im-planner.js?v=0.6.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -233,6 +233,14 @@ class IndkobMadplanPanel extends HTMLElement {
             </section>
           </div>
           <div class="toast" id="toast" hidden></div>
+          <div class="katvalg" id="katvalg" hidden>
+            <div class="kv-ark" role="dialog" aria-modal="true" aria-labelledby="kv-titel">
+              <div class="kv-greb"></div>
+              <h3 id="kv-titel">Flyt til kategori</h3>
+              <div class="kv-liste" id="kv-liste"></div>
+              <button class="kv-luk" type="button" data-act="kat-luk">Annullér</button>
+            </div>
+          </div>
         </main>
       </div>`;
     r.querySelector("[data-act=ny-linje]").hidden = this._shop;
@@ -243,6 +251,12 @@ class IndkobMadplanPanel extends HTMLElement {
       onFocusLine: (id) => (this._focusLine = id),
       scroller: r.getElementById("ark"),
       onDelete: (ln, prevId) => this._deleted(ln, prevId),
+      plus: true,
+      onPlusAdded: (res) => {
+        if (!res) this._setStatus("Kunne ikke tilføje");
+        else if (res.fandtes) this._toast(`"${res.text}" står allerede på listen`, { ms: 3500 });
+        else this._setStatus("Tilføjet");
+      },
     });
     r.addEventListener("click", (e) => this._click(e));
     // Tryk uden for listen lukker en række, der står med "Slet" fremme
@@ -288,7 +302,9 @@ class IndkobMadplanPanel extends HTMLElement {
     }
     this._state = s;
     this._cl.store = this._store;
+    this._cl.setCategories(s.indkob.kategorier);
     this._cl.setLines(s.indkob.lines);
+    if (!this.shadowRoot.getElementById("katvalg").hidden) this._renderKatvalg();
     this._renderNoteList();
     this._renderIndkob();
     this._renderMadplan();
@@ -417,11 +433,68 @@ class IndkobMadplanPanel extends HTMLElement {
     inp.value = "";
     this._renderAutofill();
     try {
-      const ln = await this._store.add(text, { auto_place: true, line_type: "item" });
-      const was = this._state?.indkob.lines.find((l) => l.id === ln.id);
-      this._setStatus(was && !was.checked ? `"${ln.text}" står allerede på listen` : "Tilføjet");
+      const res = await this._store.add(text, { auto_place: true, line_type: "item" });
+      this._added(res);
     } catch (err) {
       this._setStatus("Kunne ikke tilføje");
+    }
+  }
+
+  /* Efter automatisk placering: vis hvor varen landede + "Skift" */
+  _added(res) {
+    const kat = res.kategori ? prettyHeader(res.kategori) : "";
+    if (res.fandtes) {
+      this._cl.flash(res.id);
+      this._toast(`"${res.text}" står allerede på listen${kat ? " · " + kat : ""}`, { ms: 4000 });
+      return;
+    }
+    this._toast(kat ? `${res.text} → ${kat}` : `${res.text} er tilføjet`, {
+      label: "Skift",
+      action: () => this._openKatvalg(res.id),
+    });
+  }
+
+  /* ------------------------------------------------------------ kategorivælger */
+  _openKatvalg(lineId) {
+    this._katLine = lineId;
+    const el = this.shadowRoot.getElementById("katvalg");
+    this._renderKatvalg();
+    el.hidden = false;
+  }
+
+  _closeKatvalg() {
+    this.shadowRoot.getElementById("katvalg").hidden = true;
+    this._katLine = null;
+  }
+
+  _renderKatvalg() {
+    const s = this._state;
+    const lines = s?.indkob.lines || [];
+    const idx = lines.findIndex((l) => l.id === this._katLine);
+    if (idx < 0) return this._closeKatvalg();
+    const ln = lines[idx];
+    let cur = null;
+    for (let j = idx; j >= 0; j--) if (lines[j].type === "header") { cur = lines[j].id; break; }
+    this.shadowRoot.getElementById("kv-titel").textContent = `Flyt "${ln.text}" til`;
+    this.shadowRoot.getElementById("kv-liste").innerHTML = (s.indkob.kategorier || [])
+      .map((c) => `<button type="button" class="kv-k${c.id && c.id === cur ? " valgt" : ""}" data-act="kat-valg"
+          ${c.id ? `data-id="${esc(c.id)}"` : `data-noegle="${esc(c.fast)}"`}>
+          <span>${esc(prettyHeader(c.navn))}</span><span class="kv-n">${c.id === cur ? "✓" : c.varer || ""}</span></button>`)
+      .join("");
+  }
+
+  async _valgKategori(b) {
+    const id = this._katLine;
+    this._closeKatvalg();
+    if (!id) return;
+    try {
+      const res = await this._store.send("indkob/kategori", {
+        line_id: id, header_id: b.dataset.id || null, noegle: b.dataset.noegle || null,
+      });
+      this._setStatus(res.kategori ? `Flyttet til ${prettyHeader(res.kategori)}` : "Flyttet");
+      this._cl.flash(id);
+    } catch (err) {
+      this._setStatus("Kunne ikke flytte varen");
     }
   }
 
@@ -464,7 +537,9 @@ class IndkobMadplanPanel extends HTMLElement {
       <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
       <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" fjerner fluebenene med det samme. "Slet afkrydsede varer" fjerner varerne helt fra listen.</p>
       <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
-      <p><b>Nye varer</b> skrives i feltet øverst og lander under den overskrift, de plejer at stå under. Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
+      <p><b>Nye varer:</b> skriv i feltet øverst, så finder listen selv kategorien – den overskrift varen plejer at stå under, ellers et gæt ud fra navnet (mælk → Køl – mejeri, kyllingebryst → Køl – kød). Ved ukendte varer bliver det Ugevarer. Tryk på <i>Skift</i> i beskeden nederst, hvis den landede forkert – så huskes det til næste gang.</p>
+      <p><b>＋ under en kategori</b> tilføjer en vare lige præcis dér. Enter giver plads til den næste. Kategorier uden varer vises ikke – de dukker op, så snart der kommer en vare i dem.</p>
+      <p>Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
       <p><b>Slet en linje:</b> swipe den mod venstre (kort = vis Slet, langt = slet med det samme). Fortryd nederst på skærmen i et par sekunder. Backspace på en tom linje sletter den også.</p>
       <p><b>Overskrifter:</b> Aa gør linjen til overskrift. Enter giver en ny linje.</p>
       <p><b>Forslag</b> over listen er varer, I plejer at købe, som mangler nu. Tryk for at tilføje.</p>
@@ -795,6 +870,7 @@ class IndkobMadplanPanel extends HTMLElement {
       this._renderInsp();
       return;
     }
+    if (e.target.id === "katvalg") return this._closeKatvalg();
     const b = e.target.closest("[data-act]");
     const pop = r.getElementById("pop");
     if (pop && !e.target.closest("#pop") && b?.dataset.act !== "mere") pop.hidden = true;
@@ -836,7 +912,11 @@ class IndkobMadplanPanel extends HTMLElement {
       this._cl._focusSoon(nl.id, 0);
     } else if (act === "forslag") {
       b.disabled = true;
-      this._store.add(b.dataset.navn, { auto_place: true, line_type: "item" }).catch(() => {});
+      this._store.add(b.dataset.navn, { auto_place: true, line_type: "item" }).then((res) => this._added(res)).catch(() => {});
+    } else if (act === "kat-valg") {
+      this._valgKategori(b);
+    } else if (act === "kat-luk") {
+      this._closeKatvalg();
     } else if (act === "uge") {
       this._weekOpen = !this._weekOpen;
       this._renderMadplan();
@@ -987,6 +1067,21 @@ const PANEL_CSS = `
            display: flex; align-items: center; gap: 18px; max-width: calc(100% - 32px); padding: 12px 18px; border-radius: 14px;
            background: #2b2b2e; color: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.3); z-index: 20; font-size: 15px; white-space: nowrap; }
   .toast span { overflow: hidden; text-overflow: ellipsis; }
+  .katvalg { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.35); display: flex; align-items: flex-end; justify-content: center; }
+  .katvalg[hidden] { display: none; }
+  .kv-ark { width: 100%; max-width: 560px; max-height: 80vh; overflow: auto; box-sizing: border-box; background: var(--im-bg);
+            border-radius: 18px 18px 0 0; padding: 8px 16px calc(16px + var(--safe-area-inset-bottom, 0px));
+            box-shadow: 0 -8px 30px rgba(0,0,0,.25); }
+  .kv-greb { width: 38px; height: 5px; border-radius: 3px; background: var(--im-line); margin: 2px auto 10px; }
+  .kv-ark h3 { margin: 0 0 8px; font-size: 17px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kv-k { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px;
+          padding: 0 4px; font: inherit; font-size: 17px; color: var(--im-text); background: none; border: 0;
+          border-bottom: 1px solid var(--im-line); text-align: left; cursor: pointer; }
+  .kv-k.valgt { font-weight: 700; }
+  .kv-k .kv-n { color: var(--im-dim); font-size: 15px; }
+  .kv-k.valgt .kv-n { color: var(--im-acc-strong); font-size: 18px; }
+  .kv-luk { display: block; width: 100%; min-height: 48px; margin-top: 10px; font: inherit; font-size: 17px; font-weight: 600;
+            color: var(--im-acc); background: var(--im-bg2); border: 0; border-radius: 12px; cursor: pointer; }
   .toast button { color: var(--im-acc-strong); font-weight: 700; font-size: 15px; padding: 4px 2px; min-height: 32px; }
   .note { position: relative; }
   .insp { margin: 0 0 16px; padding: 10px 16px 12px; background: var(--im-bg2); border-radius: 14px; }
