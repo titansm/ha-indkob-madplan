@@ -2,8 +2,8 @@
 import {
   BASE_CSS, Checklist, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.6.0";
-import "./im-planner.js?v=0.6.0";
+} from "./im-common.js?v=0.7.0";
+import "./im-planner.js?v=0.7.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -128,6 +128,7 @@ class IndkobMadplanPanel extends HTMLElement {
               <div class="forslag" id="forslag"></div>
               <div id="cl"></div>
               <button class="ny-linje" data-act="ny-linje">Ny linje</button>
+              <div class="butik-fod" id="butik-fod" hidden></div>
               <details class="hjaelp" id="hjaelp">
                 <summary>ⓘ Sådan virker indkøbslisten</summary>
                 <div id="hjaelp-body"></div>
@@ -233,6 +234,21 @@ class IndkobMadplanPanel extends HTMLElement {
             </section>
           </div>
           <div class="toast" id="toast" hidden></div>
+          <div class="katvalg top" id="butikark" hidden>
+            <form class="kv-ark ba" role="dialog" aria-modal="true" aria-labelledby="ba-titel" id="ba-form" autocomplete="off">
+              <h3 id="ba-titel">Afslut indkøb</h3>
+              <p class="ba-sub" id="ba-sub"></p>
+              <div class="ba-chips" id="ba-chips"></div>
+              <label class="ba-felt"><span>Butik</span>
+                <input id="ba-butik" type="text" autocapitalize="words" enterkeyhint="next" placeholder="Fx Netto" maxlength="60" /></label>
+              <label class="ba-felt"><span>Beløb <i>(valgfrit)</i></span>
+                <span class="ba-kr"><input id="ba-beloeb" type="text" inputmode="decimal" enterkeyhint="done" placeholder="0,00" /><span>kr</span></span></label>
+              <p class="ba-fejl" id="ba-fejl" hidden></p>
+              <button class="ba-gem" type="submit" id="ba-gem">Afslut indkøb</button>
+              <button class="link ba-fortryd" type="button" data-act="ba-fortryd" id="ba-fortryd" hidden>Fortryd – varerne kommer tilbage i kurven</button>
+              <button class="kv-luk" type="button" data-act="ba-luk">Annullér</button>
+            </form>
+          </div>
           <div class="katvalg" id="katvalg" hidden>
             <div class="kv-ark" role="dialog" aria-modal="true" aria-labelledby="kv-titel">
               <div class="kv-greb"></div>
@@ -259,6 +275,17 @@ class IndkobMadplanPanel extends HTMLElement {
       },
     });
     r.addEventListener("click", (e) => this._click(e));
+    r.getElementById("ba-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      this._gemButik();
+    });
+    r.getElementById("ba-butik").addEventListener("input", () => this._markChip());
+    r.getElementById("ba-butik").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        r.getElementById("ba-beloeb").focus();
+      }
+    });
     // Tryk uden for listen lukker en række, der står med "Slet" fremme
     r.addEventListener("pointerdown", (e) => {
       if (!e.composedPath().includes(r.getElementById("cl"))) this._cl._closeOpen();
@@ -303,6 +330,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._state = s;
     this._cl.store = this._store;
     this._cl.setCategories(s.indkob.kategorier);
+    this._cl.setBought(s.indkob.tur?.koebt);
     this._cl.setLines(s.indkob.lines);
     if (!this.shadowRoot.getElementById("katvalg").hidden) this._renderKatvalg();
     this._renderNoteList();
@@ -409,16 +437,132 @@ class IndkobMadplanPanel extends HTMLElement {
     const done = items.filter((l) => l.checked).length;
     const meta = r.getElementById("meta-indkob");
     meta.classList.toggle("shop", this._shop);
-    meta.textContent = tur?.aktiv && tur.nulstilles
-      ? `Handlet ind – fluebenene fjernes ca. kl. ${kl(tur.nulstilles)}`
-      : this._shop
-        ? `Indkøbstilstand · ${done} af ${items.length} i kurven · tryk på en vare for at krydse af`
+    const koebt = tur?.koebt || {};
+    const iKurv = items.filter((l) => l.checked && !koebt[l.id]).length;
+    const tilbage = items.length - done;
+    meta.textContent = this._shop
+      ? `Indkøbstilstand · ${tilbage ? tilbage + " tilbage" : "alt er købt"}${iKurv ? ` · ${iKurv} i kurven` : ""} · tryk på en vare for at krydse af`
+      : tur?.aktiv && tur.nulstilles
+        ? `Handlet ind – fluebenene fjernes ca. kl. ${kl(tur.nulstilles)}`
         : s.indkob.updated
           ? `Ændret ${relTime(s.indkob.updated)}${s.indkob.updated_by ? " af " + s.indkob.updated_by : ""}`
           : "";
     const open = items.filter((l) => !l.checked).map((l) => l.text);
     r.getElementById("forslag").innerHTML = forslagHTML(s.stats, open);
     this._renderAutofill();
+    this._renderButikFod(tur, iKurv, tilbage, kl);
+    if (!r.getElementById("butikark").hidden && !this._baStop) this._renderButikSub(iKurv);
+  }
+
+  /* ------------------------------------------------------------ afslut indkøb i butik (Handl) */
+  _renderButikFod(tur, iKurv, tilbage, kl) {
+    const el = this.shadowRoot.getElementById("butik-fod");
+    el.hidden = !this._shop;
+    if (!this._shop) return;
+    const stops = tur?.butikker || [];
+    const varer = (n) => `${n} ${n === 1 ? "vare" : "varer"}`;
+    const liste = stops.map((st) => `<button type="button" class="bf-stop" data-act="ba-ret" data-stop="${esc(st.id)}">
+        <span class="bf-ok">✓</span><span class="bf-tx"><b>${esc(st.butik)}</b> · ${varer(st.antal)}</span>
+        <span class="bf-pris${st.beloeb ? "" : " mangler"}">${st.beloeb ? kr(st.beloeb) : "+ pris"}</span></button>`).join("");
+    const hint = iKurv
+      ? ""
+      : stops.length
+        ? `<p class="bf-hint">${tilbage ? "Handler I videre i en anden butik, så kryds varerne af og afslut igen." : "Alt på listen er købt."}${tur?.nulstilles ? ` Fluebenene fjernes ca. kl. ${kl(tur.nulstilles)}.` : ""}</p>`
+        : `<p class="bf-hint">Kryds de varer af, I lægger i kurven – afslut, når I har betalt.</p>`;
+    el.innerHTML = `${liste ? `<div class="bf-liste">${liste}</div>` : ""}
+      <button type="button" class="bf-knap" data-act="ba-aabn" ${iKurv ? "" : "disabled"}>${ICON_CART}<span>Afslut indkøb i butik${iKurv ? ` (${varer(iKurv)})` : ""}</span></button>
+      ${hint}`;
+  }
+
+  _butikNavne() {
+    const s = this._state;
+    const navne = [];
+    const add = (n) => n && !navne.some((x) => x.toLowerCase() === n.toLowerCase()) && navne.push(n);
+    for (const b of s?.historik?.butikker || []) add(b.navn);
+    return navne.slice(0, 8);
+  }
+
+  _renderButikSub(iKurv) {
+    const r = this.shadowRoot;
+    r.getElementById("ba-sub").textContent = iKurv
+      ? `${iKurv} ${iKurv === 1 ? "vare" : "varer"} i kurven gemmes som købt i butikken.`
+      : "Ingen nye varer i kurven.";
+    r.getElementById("ba-gem").disabled = !iKurv;
+  }
+
+  _openButik(stopId = null) {
+    const r = this.shadowRoot;
+    const tur = this._state?.indkob.tur || {};
+    const st = stopId ? (tur.butikker || []).find((x) => x.id === stopId) : null;
+    if (stopId && !st) return;
+    this._baStop = stopId;
+    r.getElementById("ba-titel").textContent = st ? `Indkøbet i ${st.butik}` : "Afslut indkøb i butik";
+    if (st) r.getElementById("ba-sub").textContent = `${st.antal} ${st.antal === 1 ? "vare" : "varer"} · ret butik eller beløb`;
+    else {
+      const items = this._state.indkob.lines.filter((l) => l.type === "item" && l.text.trim());
+      this._renderButikSub(items.filter((l) => l.checked && !(tur.koebt || {})[l.id]).length);
+    }
+    r.getElementById("ba-gem").textContent = st ? "Gem" : "Afslut indkøb";
+    if (st) r.getElementById("ba-gem").disabled = false;
+    r.getElementById("ba-fortryd").hidden = !st;
+    r.getElementById("ba-fejl").hidden = true;
+    r.getElementById("ba-butik").value = st ? st.butik : "";
+    r.getElementById("ba-beloeb").value = st && st.beloeb ? String(st.beloeb).replace(".", ",") : "";
+    r.getElementById("ba-chips").innerHTML = this._butikNavne()
+      .map((n) => `<button type="button" class="ba-chip" data-act="ba-chip" data-navn="${esc(n)}">${esc(n)}</button>`).join("");
+    this._markChip();
+    r.getElementById("butikark").hidden = false;
+  }
+
+  _markChip() {
+    const r = this.shadowRoot;
+    const v = r.getElementById("ba-butik").value.trim().toLowerCase();
+    for (const c of r.querySelectorAll(".ba-chip")) c.classList.toggle("valgt", c.dataset.navn.toLowerCase() === v);
+  }
+
+  _closeButik() {
+    const r = this.shadowRoot;
+    r.getElementById("butikark").hidden = true;
+    for (const id of ["ba-butik", "ba-beloeb"]) r.getElementById(id).blur();
+    this._baStop = null;
+  }
+
+  _baFejl(t) {
+    const el = this.shadowRoot.getElementById("ba-fejl");
+    el.textContent = t;
+    el.hidden = false;
+  }
+
+  async _gemButik() {
+    const r = this.shadowRoot;
+    const butik = r.getElementById("ba-butik").value.trim();
+    const rå = r.getElementById("ba-beloeb").value.trim();
+    if (!butik) return this._baFejl("Vælg eller skriv butikken.");
+    const beloeb = rå ? parseKr(rå) : null;
+    if (rå && beloeb === null) return this._baFejl("Beløbet kan ikke læses – skriv fx 234,50.");
+    const stopId = this._baStop;
+    const data = { butik, ...(beloeb !== null ? { beloeb } : {}) };
+    r.getElementById("ba-gem").disabled = true;
+    try {
+      if (stopId) {
+        await this._store.send("indkob/butik_ret", { stop_id: stopId, ...data, beloeb: beloeb ?? 0 });
+        this._closeButik();
+        this._setStatus(`${butik} er rettet`);
+      } else {
+        const res = await this._store.send("indkob/butik_afslut", data);
+        this._closeButik();
+        if (navigator.vibrate) navigator.vibrate(12);
+        this._toast(`${res.butik}: ${res.antal} ${res.antal === 1 ? "vare" : "varer"}${res.beloeb ? " · " + kr(res.beloeb) : ""} gemt`, {
+          label: "Fortryd",
+          action: () => this._store.send("indkob/butik_fortryd", { stop_id: res.stop_id })
+            .then(() => this._setStatus("Fortrudt – varerne er tilbage i kurven"))
+            .catch(() => this._setStatus("Kunne ikke fortryde")),
+        });
+      }
+    } catch (err) {
+      r.getElementById("ba-gem").disabled = false;
+      this._baFejl(err?.message || "Kunne ikke gemme – prøv igen.");
+    }
   }
 
   _renderAutofill() {
@@ -537,6 +681,7 @@ class IndkobMadplanPanel extends HTMLElement {
       <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
       <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" fjerner fluebenene med det samme. "Slet afkrydsede varer" fjerner varerne helt fra listen.</p>
       <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
+      <p><b>Afslut indkøb i butik:</b> når I har betalt, så tryk på knappen nederst i listen, vælg butikken og skriv evt. beløbet. Varerne gemmes som købt i den butik og forsvinder fra listen, så kun det, der mangler, står tilbage. Handler I videre i en anden butik, gør I bare det samme dér – det er ikke et krav. ${tim[0].toUpperCase() + tim.slice(1)} efter sidste butik fjernes fluebenene. Glemmer I knappen, registreres indkøbet stadig automatisk (uden butik og pris).</p>
       <p><b>Nye varer:</b> skriv i feltet øverst, så finder listen selv kategorien – den overskrift varen plejer at stå under, ellers et gæt ud fra navnet (mælk → Køl – mejeri, kyllingebryst → Køl – kød). Ved ukendte varer bliver det Ugevarer. Tryk på <i>Skift</i> i beskeden nederst, hvis den landede forkert – så huskes det til næste gang.</p>
       <p><b>＋ under en kategori</b> tilføjer en vare lige præcis dér. Enter giver plads til den næste. Kategorier uden varer vises ikke – de dukker op, så snart der kommer en vare i dem.</p>
       <p>Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
@@ -871,6 +1016,7 @@ class IndkobMadplanPanel extends HTMLElement {
       return;
     }
     if (e.target.id === "katvalg") return this._closeKatvalg();
+    if (e.target.id === "butikark") return this._closeButik();
     const b = e.target.closest("[data-act]");
     const pop = r.getElementById("pop");
     if (pop && !e.target.closest("#pop") && b?.dataset.act !== "mere") pop.hidden = true;
@@ -906,6 +1052,22 @@ class IndkobMadplanPanel extends HTMLElement {
       if (!ln) return;
       await this._store.update(id, { line_type: ln.type === "header" ? "item" : "header" });
       this._cl._focusSoon(id, "end");
+    } else if (act === "ba-aabn") {
+      this._openButik();
+    } else if (act === "ba-ret") {
+      this._openButik(b.dataset.stop);
+    } else if (act === "ba-luk") {
+      this._closeButik();
+    } else if (act === "ba-chip") {
+      this.shadowRoot.getElementById("ba-butik").value = b.dataset.navn;
+      this._markChip();
+      this.shadowRoot.getElementById("ba-fejl").hidden = true;
+    } else if (act === "ba-fortryd") {
+      const id = this._baStop;
+      this._closeButik();
+      if (id) this._store.send("indkob/butik_fortryd", { stop_id: id })
+        .then(() => this._setStatus("Fortrudt – varerne er tilbage i kurven"))
+        .catch(() => this._setStatus("Kunne ikke fortryde"));
     } else if (act === "ny-linje") {
       const last = this._state.indkob.lines.at(-1);
       const nl = await this._store.add("", { after_id: last ? last.id : null, line_type: "item" });
@@ -1101,6 +1263,42 @@ const PANEL_CSS = `
   .insp .fod { font-size: 13px; color: var(--im-dim); margin: 8px 0 0; }
   #cl[data-empty]::before { content: "Listen er tom. Skriv en vare ovenfor."; color: var(--im-dim); padding: 12px 0; }
   .ny-linje { color: var(--im-acc); font-weight: 600; padding: 14px 0; }
+  .butik-fod { margin: 18px 0 calc(90px + var(--safe-area-inset-bottom, 0px)); }
+  .butik-fod[hidden] { display: none; }
+  .bf-liste { margin-bottom: 12px; border-radius: 14px; background: var(--im-bg2); overflow: hidden; }
+  .bf-stop { display: flex; width: 100%; align-items: center; gap: 10px; min-height: 48px; padding: 0 14px; font: inherit; font-size: 16px;
+             color: var(--im-text); background: none; border: 0; border-bottom: 1px solid var(--im-line); text-align: left; cursor: pointer; }
+  .bf-stop:last-child { border-bottom: 0; }
+  .bf-ok { color: var(--im-acc-strong); font-weight: 700; }
+  .bf-tx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bf-pris { font-variant-numeric: tabular-nums; }
+  .bf-pris.mangler { color: var(--im-acc); font-weight: 600; font-size: 15px; }
+  .bf-knap { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 52px; border: 0; border-radius: 14px;
+             font: inherit; font-size: 17px; font-weight: 700; color: #fff; background: var(--im-acc); cursor: pointer; }
+  .bf-knap svg { width: 20px; height: 20px; }
+  .bf-knap:disabled { background: var(--im-bg2); color: var(--im-dim); cursor: default; }
+  .bf-hint { margin: 10px 2px 0; color: var(--im-dim); font-size: 14px; line-height: 1.4; text-align: center; }
+  .katvalg.top { align-items: flex-start; }
+  .katvalg.top .kv-ark { border-radius: 0 0 18px 18px; padding: calc(14px + var(--safe-area-inset-top, 0px)) 16px 16px; }
+  .ba h3 { white-space: normal; }
+  .ba-sub { margin: 0 0 12px; color: var(--im-dim); font-size: 15px; }
+  .ba-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .ba-chips:empty { display: none; }
+  .ba-chip { min-height: 36px; padding: 0 14px; border-radius: 18px; border: 1px solid var(--im-line); background: var(--im-bg);
+             font: inherit; font-size: 15px; color: var(--im-text); cursor: pointer; }
+  .ba-chip.valgt { background: var(--im-acc); border-color: var(--im-acc); color: #fff; font-weight: 600; }
+  .ba-felt { display: block; margin-bottom: 12px; }
+  .ba-felt > span:first-child { display: block; font-size: 13px; color: var(--im-dim); margin: 0 0 4px 2px; }
+  .ba-felt i { font-style: normal; }
+  .ba-felt input { width: 100%; box-sizing: border-box; font: inherit; font-size: 17px; padding: 12px; border-radius: 12px;
+                   border: 1px solid var(--im-line); background: var(--im-bg2); color: var(--im-text); }
+  .ba-kr { display: flex; align-items: center; gap: 8px; }
+  .ba-kr > span { color: var(--im-dim); font-size: 17px; }
+  .ba-fejl { color: #d33; margin: 0 0 10px; font-size: 15px; }
+  .ba-gem { display: block; width: 100%; min-height: 50px; border: 0; border-radius: 12px; font: inherit; font-size: 17px; font-weight: 700;
+            color: #fff; background: var(--im-acc); cursor: pointer; }
+  .ba-gem:disabled { opacity: .45; cursor: default; }
+  .ba-fortryd { display: block; margin: 12px auto 0; color: var(--im-acc); font-size: 15px; }
 
   .plan-cta { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin: -4px 0 16px; padding: 12px 14px;
               border-radius: 14px; background: color-mix(in srgb, var(--im-acc-strong) 20%, var(--im-bg2)); }

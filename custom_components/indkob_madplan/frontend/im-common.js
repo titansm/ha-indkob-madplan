@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.6.0";
+export const VERSION = "0.7.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -214,6 +214,7 @@ export class Checklist {
     this.onPlusAdded = onPlusAdded; // (svar fra indkob/add, tekst)
     this.plusRows = new Map(); // overskrift-id -> række
     this.fixed = new Set(); // id'er på faste kategorier (skjules når de er tomme)
+    this.bought = new Map(); // linje-id -> butik (købt i en butik, der er afsluttet på turen)
     this._plusQueue = Promise.resolve();
     this._plusLast = null; // {header, id}: seneste vare tilføjet via "+"
     this.dirty = new Map(); // id -> timer
@@ -264,6 +265,11 @@ export class Checklist {
     for (const row of this.plusRows.values()) row.remove();
     this.plusRows.clear();
     this.render();
+  }
+
+  /* Varer købt i en afsluttet butik (state.indkob.tur.koebt) – skjules i indkøbstilstand. */
+  setBought(map) {
+    this.bought = new Map(Object.entries(map || {}));
   }
 
   /* Faste kategorier (fra state.indkob.kategorier) – tomme skjules. */
@@ -564,7 +570,8 @@ export class Checklist {
         this.rows.set(ln.id, row);
       }
       this._fillRow(row, ln);
-      const hidden = ln.type === "item" && ln.checked && this.hideChecked;
+      const koebt = ln.type === "item" && ln.checked && this.bought.has(ln.id);
+      const hidden = (ln.type === "item" && ln.checked && this.hideChecked) || (koebt && !this.editable);
       row.hidden = hidden || (!this.editable && ln.type === "blank");
       if (ln.type === "item" && !hidden) visibleItems++;
     }
@@ -722,6 +729,10 @@ export class Checklist {
 
   _fillRow(row, ln) {
     row.classList.toggle("done", !!ln.checked);
+    const butik = ln.checked ? this.bought.get(ln.id) : null;
+    row.classList.toggle("koebt", !!butik);
+    if (butik) row.firstElementChild.dataset.butik = butik;
+    else delete row.firstElementChild.dataset.butik;
     const chk = row.querySelector(".chk");
     if (chk) chk.setAttribute("aria-checked", String(!!ln.checked));
     const tx = row.querySelector(".tx");
@@ -1035,6 +1046,9 @@ export const BASE_CSS = `
   .ln.done .chk::after { content: ""; position: absolute; left: 7.5px; top: 3px; width: 6px; height: 11px;
          border: solid #fff; border-width: 0 2.2px 2.2px 0; transform: rotate(45deg); }
   .ln.done .tx { color: var(--im-dim); text-decoration: line-through; }
+  .ln.koebt .inner::after { content: attr(data-butik); order: 2; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+                            white-space: nowrap; font-size: 12px; color: var(--im-dim); padding: 2px 8px; border-radius: 10px; background: var(--im-bg2); }
+  .ln.koebt .grip { order: 3; }
   .grip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px;
           margin-right: -10px; color: var(--im-dim); opacity: .45; touch-action: none; cursor: grab;
           -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
