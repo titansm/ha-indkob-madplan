@@ -1,8 +1,8 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
-  BASE_CSS, Checklist, aftenHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume, nyUgeSkabelon,
-  relTime, scrollerOf, statsHTML,
-} from "./im-common.js?v=0.3.3";
+  BASE_CSS, Checklist, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
+  nyUgeSkabelon, relTime, scrollerOf, sidenTekst, statsHTML,
+} from "./im-common.js?v=0.4.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -57,7 +57,10 @@ class IndkobMadplanPanel extends HTMLElement {
       if (document.visibilityState === "hidden" && this._open === "indkob" && location.pathname.startsWith("/indkob-madplan")) markResume();
     };
     this._hideChecked = lsGet("hideChecked", false);
+    this._shop = lsGet("shop", false); // indkøbstilstand: tryk på rækken krydser af, intet tastatur
     this._weekOpen = false;
+    this._insp = { tab: "oftest", q: "", data: null, version: null };
+    this._mpCaret = null;
     this._mpDirty = false;
     this._mpTimer = null;
     this._mpBase = null;
@@ -118,8 +121,9 @@ class IndkobMadplanPanel extends HTMLElement {
               <h2 class="titel">Indkøbsliste</h2>
               <p class="meta" id="meta-indkob"></p>
               <form class="hurtig" id="hurtig" autocomplete="off">
-                <input id="ny" type="text" enterkeyhint="done" placeholder="Tilføj vare …" aria-label="Tilføj vare" />
+                <input id="ny" type="text" enterkeyhint="done" placeholder="Tilføj vare …" aria-label="Tilføj vare" autocapitalize="sentences" />
               </form>
+              <div class="forslag" id="af"></div>
               <div class="forslag" id="forslag"></div>
               <div id="cl"></div>
               <button class="ny-linje" data-act="ny-linje">Ny linje</button>
@@ -132,6 +136,17 @@ class IndkobMadplanPanel extends HTMLElement {
               <h2 class="titel">Madplan</h2>
               <p class="meta" id="meta-madplan"></p>
               <div class="aften" id="aften"></div>
+              <details class="insp" id="insp">
+                <summary>💡 Inspiration fra tidligere uger</summary>
+                <input id="insp-sog" type="search" placeholder="Søg i madplanen, fx karry …" aria-label="Søg i madplanen" autocomplete="off" />
+                <div class="insp-faner" id="insp-faner">
+                  <button type="button" data-insp="oftest" aria-pressed="true">Oftest</button>
+                  <button type="button" data-insp="laenge" aria-pressed="false">Længe siden</button>
+                  <button type="button" data-insp="sjaeldent" aria-pressed="false">Sjældent</button>
+                </div>
+                <div id="insp-liste" class="insp-liste"></div>
+                <p class="fod">Tryk på en ret for at sætte den ind i madplanen – på den dag, markøren står på.</p>
+              </details>
               <div class="konflikt" id="konflikt" hidden>
                 <span id="konflikt-tekst">Madplanen er ændret på en anden enhed.</span>
                 <button class="link" data-act="hent-nyeste">Hent nyeste</button>
@@ -201,23 +216,31 @@ class IndkobMadplanPanel extends HTMLElement {
               <p class="fod version" id="s-version"></p>
             </section>
           </div>
+          <div class="toast" id="toast" hidden></div>
         </main>
       </div>`;
+    r.querySelector("[data-act=ny-linje]").hidden = this._shop;
     this._cl = new Checklist(r.getElementById("cl"), null, {
-      editable: true,
+      editable: !this._shop,
+      tapToggle: this._shop,
       hideChecked: this._hideChecked,
       onFocusLine: (id) => (this._focusLine = id),
       scroller: r.getElementById("ark"),
+      onDelete: (ln, prevId) => this._deleted(ln, prevId),
     });
     r.addEventListener("click", (e) => this._click(e));
+    // Tryk uden for listen lukker en række, der står med "Slet" fremme
+    r.addEventListener("pointerdown", (e) => {
+      if (!e.composedPath().includes(r.getElementById("cl"))) this._cl._closeOpen();
+    });
+    const ny = r.getElementById("ny");
     r.getElementById("hurtig").addEventListener("submit", (e) => {
       e.preventDefault();
-      const inp = r.getElementById("ny");
-      const v = inp.value.trim();
+      const v = ny.value.trim();
       if (!v) return;
-      inp.value = "";
-      this._store.add(v, { auto_place: true, line_type: "item" }).catch(() => {});
+      this._quickAdd(v);
     });
+    ny.addEventListener("input", () => this._renderAutofill());
     const ta = r.getElementById("mp");
     ta.addEventListener("input", () => {
       this._mpDirty = true;
@@ -226,7 +249,14 @@ class IndkobMadplanPanel extends HTMLElement {
       clearTimeout(this._mpTimer);
       this._mpTimer = setTimeout(() => this._flushMadplan(), 800);
     });
-    ta.addEventListener("blur", () => this._flushMadplan());
+    const caret = () => (this._mpCaret = ta.selectionStart);
+    for (const ev of ["keyup", "click", "select", "input"]) ta.addEventListener(ev, caret);
+    ta.addEventListener("blur", () => { caret(); this._flushMadplan(); });
+    r.getElementById("insp").addEventListener("toggle", () => this._renderInsp());
+    r.getElementById("insp-sog").addEventListener("input", (e) => {
+      this._insp.q = e.target.value;
+      this._renderInsp();
+    });
     r.getElementById("v-indstillinger").addEventListener("change", (e) => this._settingChanged(e));
     r.getElementById("v-indstillinger").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && e.target.matches("input[type=text]")) e.target.blur();
@@ -246,6 +276,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderNoteList();
     this._renderIndkob();
     this._renderMadplan();
+    if (this._insp.data && this._insp.version !== s.madplan.version) this._renderInsp();
     this.shadowRoot.getElementById("stats-body").innerHTML = statsHTML(s.stats);
     this._renderHelp();
     this._renderSettings();
@@ -321,7 +352,8 @@ class IndkobMadplanPanel extends HTMLElement {
     const t = this.shadowRoot.getElementById("vaerktoej");
     if (open === "indkob") {
       t.innerHTML = `
-        <button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>
+        <button class="vk shop" data-act="handl" aria-pressed="${this._shop}" title="Indkøbstilstand: tryk på varen for at krydse af">${this._shop ? "Rediger" : ICON_CART + "<span>Handl</span>"}</button>
+        ${this._shop ? "" : `<button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>`}
         <button class="vk" data-act="skjul" aria-pressed="${this._hideChecked}" title="Skjul afkrydsede">${this._hideChecked ? "Vis alle" : "Skjul købte"}</button>
         <button class="vk" data-act="mere" aria-haspopup="true" aria-label="Flere handlinger">${ICON_MORE}</button>
         <div class="menu-pop" id="pop" hidden>
@@ -339,13 +371,67 @@ class IndkobMadplanPanel extends HTMLElement {
     const r = this.shadowRoot;
     const tur = s.indkob.tur;
     const kl = (iso) => new Date(iso).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" });
-    r.getElementById("meta-indkob").textContent = tur?.aktiv && tur.nulstilles
+    const items = s.indkob.lines.filter((l) => l.type === "item" && l.text.trim());
+    const done = items.filter((l) => l.checked).length;
+    const meta = r.getElementById("meta-indkob");
+    meta.classList.toggle("shop", this._shop);
+    meta.textContent = tur?.aktiv && tur.nulstilles
       ? `Handlet ind – fluebenene fjernes ca. kl. ${kl(tur.nulstilles)}`
-      : s.indkob.updated
-        ? `Ændret ${relTime(s.indkob.updated)}${s.indkob.updated_by ? " af " + s.indkob.updated_by : ""}`
-        : "";
-    const open = s.indkob.lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text);
+      : this._shop
+        ? `Indkøbstilstand · ${done} af ${items.length} i kurven · tryk på en vare for at krydse af`
+        : s.indkob.updated
+          ? `Ændret ${relTime(s.indkob.updated)}${s.indkob.updated_by ? " af " + s.indkob.updated_by : ""}`
+          : "";
+    const open = items.filter((l) => !l.checked).map((l) => l.text);
     r.getElementById("forslag").innerHTML = forslagHTML(s.stats, open);
+    this._renderAutofill();
+  }
+
+  _renderAutofill() {
+    const r = this.shadowRoot;
+    const s = this._state;
+    r.getElementById("af").innerHTML = s ? autofillHTML(s.indkob.kendte, r.getElementById("ny").value, s.indkob.lines) : "";
+  }
+
+  async _quickAdd(text) {
+    const r = this.shadowRoot;
+    const inp = r.getElementById("ny");
+    inp.value = "";
+    this._renderAutofill();
+    try {
+      const ln = await this._store.add(text, { auto_place: true, line_type: "item" });
+      const was = this._state?.indkob.lines.find((l) => l.id === ln.id);
+      this._setStatus(was && !was.checked ? `"${ln.text}" står allerede på listen` : "Tilføjet");
+    } catch (err) {
+      this._setStatus("Kunne ikke tilføje");
+    }
+  }
+
+  _setShop(on) {
+    this._shop = on;
+    lsSet("shop", on);
+    this._cl.setMode({ editable: !on, tapToggle: on });
+    this.shadowRoot.querySelector("[data-act=ny-linje]").hidden = on;
+    this._renderTools("indkob");
+    if (this._state) this._renderIndkob();
+  }
+
+  /* Swipe-slet: vis "Fortryd" i nogle sekunder */
+  _deleted(ln, prevId) {
+    const navn = ln.text.trim();
+    this._toast(navn ? `Slettede "${navn}"` : "Linjen blev slettet", {
+      label: "Fortryd",
+      action: () => this._store.restore(ln, prevId).catch(() => this._setStatus("Kunne ikke gendanne")),
+    });
+  }
+
+  _toast(text, { label = null, action = null, ms = 6000 } = {}) {
+    const el = this.shadowRoot.getElementById("toast");
+    el.innerHTML = `<span>${esc(text)}</span>${label ? `<button type="button" data-act="toast-knap">${esc(label)}</button>` : ""}`;
+    el.hidden = false;
+    this._toastAction = action;
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => (el.hidden = true), ms);
   }
 
   /* ------------------------------------------------------------ hjælp */
@@ -359,8 +445,10 @@ class IndkobMadplanPanel extends HTMLElement {
       <p><b>Kryds af, når varen ryger i kurven.</b> Hvert flueben tæller som et køb i statistikken. Fjerner du et flueben igen inden for 12 timer, regnes det som fortrudt.</p>
       <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
       <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" fjerner fluebenene med det samme. "Slet afkrydsede varer" fjerner varerne helt fra listen.</p>
-      <p><b>Nye varer</b> skrives i feltet øverst og lander under den overskrift, de plejer at stå under. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
-      <p><b>Overskrifter:</b> Aa gør linjen til overskrift. Enter giver en ny linje, Backspace på en tom linje sletter den.</p>
+      <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
+      <p><b>Nye varer</b> skrives i feltet øverst og lander under den overskrift, de plejer at stå under. Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
+      <p><b>Slet en linje:</b> swipe den mod venstre (kort = vis Slet, langt = slet med det samme). Fortryd nederst på skærmen i et par sekunder. Backspace på en tom linje sletter den også.</p>
+      <p><b>Overskrifter:</b> Aa gør linjen til overskrift. Enter giver en ny linje.</p>
       <p><b>Forslag</b> over listen er varer, I plejer at købe, som mangler nu. Tryk for at tilføje.</p>
       <p><b>Indkøbshistorik:</b> hver indkøbstur gemmes med dato og varer. Tryk på turen for at skrive butik og pris – flere butikker pr. tur går fint. Handler I uden listen, kan I tilføje indkøbet selv.</p>
       <p><b>Redigeringslog:</b> viser hvem der har tilføjet, rettet, krydset af eller slettet hvad.</p>
@@ -520,6 +608,84 @@ class IndkobMadplanPanel extends HTMLElement {
     }
   }
 
+  /* ------------------------------------------------------------ inspiration */
+  async _renderInsp() {
+    const r = this.shadowRoot;
+    const det = r.getElementById("insp");
+    if (!det.open || !this._store) return;
+    const ver = this._state?.madplan.version;
+    if (!this._insp.data || this._insp.version !== ver) {
+      try {
+        this._insp.data = await this._store.retter();
+        this._insp.version = ver;
+      } catch (err) {
+        r.getElementById("insp-liste").innerHTML = `<p class="tom-tekst">Kunne ikke hente retterne.</p>`;
+        return;
+      }
+    }
+    const d = this._insp.data;
+    const q = this._insp.q.trim().toLowerCase();
+    const tab = this._insp.tab;
+    r.getElementById("insp-faner").hidden = !!q;
+    for (const b of r.querySelectorAll("[data-insp]")) b.setAttribute("aria-pressed", String(b.dataset.insp === tab));
+    const fmtDato = (iso) => { const dd = new Date(iso + "T12:00:00"); return `${dd.getDate()}/${dd.getMonth() + 1}`; };
+    let html;
+    if (q) {
+      const hits = (d.dage || []).filter((x) => x.ret.toLowerCase().includes(q) || (x.noter || []).join(" ").toLowerCase().includes(q)).slice(0, 40);
+      html = hits.length
+        ? hits.map((x) => `<button type="button" class="ret-r" data-act="ret" data-navn="${esc(x.ret)}">
+            <span class="rn">${esc(x.ret)}</span><span class="rc">${x.ugedag.slice(0, 3)} ${fmtDato(x.dato)}${x.uge ? " · uge " + x.uge : ""}</span>
+            ${x.noter?.length ? `<span class="ri">${esc(x.noter.join(", "))}</span>` : ""}</button>`).join("")
+        : `<p class="tom-tekst">Ingen retter matcher "${esc(this._insp.q.trim())}".</p>`;
+    } else {
+      let liste = (d.retter || []).filter((x) => x.antal >= 2);
+      if (tab === "laenge") liste = [...liste].sort((a, b) => b.dage_siden - a.dage_siden || b.antal - a.antal);
+      if (tab === "sjaeldent") liste = (d.retter || []).filter((x) => x.antal === 1).sort((a, b) => b.dage_siden - a.dage_siden);
+      liste = liste.slice(0, 30);
+      html = liste.length
+        ? liste.map((x) => `<button type="button" class="ret-r" data-act="ret" data-navn="${esc(x.navn)}">
+            <span class="rn">${esc(x.navn)}</span><span class="rc">${x.antal}×${x.rest_gange ? " +rester" : ""}</span>
+            <span class="ri">sidst ${sidenTekst(x.dage_siden)}</span></button>`).join("")
+        : `<p class="tom-tekst">Når madplanen har nogle uger bag sig, dukker retterne op her.</p>`;
+    }
+    r.getElementById("insp-liste").innerHTML = html;
+  }
+
+  /* Sæt en ret ind i madplanen: på markørens dag-linje hvis den er tom, ellers ved markøren. */
+  _insertRet(navn) {
+    const ta = this.shadowRoot.getElementById("mp");
+    const v = ta.value;
+    let pos = this._mpCaret ?? ta.selectionStart ?? 0;
+    pos = Math.max(0, Math.min(pos, v.length));
+    const ls = v.lastIndexOf("\n", pos - 1) + 1;
+    let le = v.indexOf("\n", pos);
+    if (le < 0) le = v.length;
+    const line = v.slice(ls, le);
+    let out, caret;
+    const m = line.match(/^(\s*[\p{L}]+\.?\s*:?)\s*$/u); // "Fredag:" / "Fredag" uden ret
+    if (m) {
+      const head = m[1].replace(/\s+$/, "");
+      const ny = `${head}${head.endsWith(":") ? "" : ":"} ${navn}`;
+      out = v.slice(0, ls) + ny + v.slice(le);
+      caret = ls + ny.length;
+      // Hop videre til næste tomme dag-linje, så næste tryk fylder den
+      const nextStart = caret + 1;
+      const nextEnd = out.indexOf("\n", nextStart);
+      const next = out.slice(nextStart, nextEnd < 0 ? out.length : nextEnd);
+      if (nextStart <= out.length && /^\s*[\p{L}]+\.?\s*:?\s*$/u.test(next) && next.trim()) caret = nextStart + next.replace(/\s+$/, "").length;
+    } else {
+      const before = v.slice(0, pos), after = v.slice(pos);
+      const sep = before && !/[\s:]$/.test(before) ? " " : "";
+      out = before + sep + navn + after;
+      caret = (before + sep + navn).length;
+    }
+    ta.value = out;
+    this._mpCaret = caret;
+    try { ta.setSelectionRange(caret, caret); } catch (e) {}
+    ta.dispatchEvent(new Event("input"));
+    this._setStatus(`Indsat: ${navn}`);
+  }
+
   async _flushMadplan() {
     clearTimeout(this._mpTimer);
     if (!this._mpDirty || !this._store) return;
@@ -565,6 +731,12 @@ class IndkobMadplanPanel extends HTMLElement {
       lsSet("scroll_" + this._open, 0);
       this._layout();
       r.getElementById("ark").scrollTop = 0;
+      return;
+    }
+    const insp = e.target.closest("[data-insp]");
+    if (insp) {
+      this._insp.tab = insp.dataset.insp;
+      this._renderInsp();
       return;
     }
     const b = e.target.closest("[data-act]");
@@ -614,12 +786,25 @@ class IndkobMadplanPanel extends HTMLElement {
       this._renderMadplan();
     } else if (act === "ny-uge") {
       const ta = r.getElementById("mp");
-      const tpl = nyUgeSkabelon();
+      const tpl = nyUgeSkabelon(new Date(), this._state?.madplan.sidste_dato || null);
       ta.value = tpl + (ta.value.trim() ? "\n\n" + ta.value : "");
       ta.dispatchEvent(new Event("input"));
       ta.focus();
       const pos = tpl.indexOf(": ") + 2;
+      this._mpCaret = pos;
       ta.setSelectionRange(pos, pos);
+      r.getElementById("ark").scrollTop = 0;
+    } else if (act === "ret") {
+      this._insertRet(b.dataset.navn);
+    } else if (act === "autofill") {
+      this._quickAdd(b.dataset.navn);
+    } else if (act === "handl") {
+      this._setShop(!this._shop);
+    } else if (act === "toast-knap") {
+      r.getElementById("toast").hidden = true;
+      clearTimeout(this._toastTimer);
+      this._toastAction?.();
+      this._toastAction = null;
     } else if (act === "tur") {
       this._openTrip = this._openTrip === b.dataset.id ? null : b.dataset.id;
       this._renderHistorik(true);
@@ -688,6 +873,7 @@ class IndkobMadplanPanel extends HTMLElement {
 
 const ICON_MENU = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2Z"/></svg>`;
 const ICON_BACK = `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M15.4 4.6 8 12l7.4 7.4-1.4 1.4L5.2 12 14 3.2z"/></svg>`;
+const ICON_CART = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M7 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4m10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4M7.2 14.8l.03-.12.9-1.68h7.45c.75 0 1.41-.41 1.75-1.03l3.86-7.01L19.42 4h-.01l-1.1 2-2.76 5H8.53l-.13-.27L6.16 6l-.95-2-.94-2H1v2h2l3.6 7.59-1.35 2.45c-.16.28-.25.61-.25.96a2 2 0 0 0 2 2h12v-2H7.42a.25.25 0 0 1-.22-.2Z"/></svg>`;
 const ICON_MORE = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M12 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3m-6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3m12 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3"/></svg>`;
 
 const PANEL_CSS = `
@@ -703,7 +889,9 @@ const PANEL_CSS = `
   .menu, .tilbage { display: inline-flex; align-items: center; color: var(--im-acc); min-height: 44px; min-width: 44px; }
   .tilbage span { font-size: 17px; }
   .app:not(.smal) .tilbage { visibility: hidden; }
-  .status { font-size: .8rem; color: var(--im-dim); margin-left: auto; }
+  .status { font-size: .8rem; color: var(--im-dim); margin-left: auto; min-width: 0; max-width: 38%; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+  .bar .tilbage, .bar .vaerktoej { flex: none; }
   .vaerktoej { display: flex; align-items: center; gap: 2px; position: relative; }
   .vk { color: var(--im-acc); font-weight: 600; min-height: 44px; min-width: 44px; padding: 0 8px; border-radius: 8px; }
   .vk[aria-pressed="true"] { background: color-mix(in srgb, var(--im-acc) 14%, transparent); }
@@ -729,7 +917,32 @@ const PANEL_CSS = `
   .hurtig input { width: 100%; box-sizing: border-box; font: inherit; font-size: 17px; padding: 11px 14px; border-radius: 12px;
                   border: 0; background: var(--im-bg2); color: var(--im-text); }
   .forslag { margin: 10px 0 4px; }
+  #af:not(:empty) { margin: 8px 0 0; }
   #cl { margin-top: 8px; }
+  .meta.shop { color: var(--im-acc); font-weight: 600; }
+  .vk.shop { display: inline-flex; align-items: center; gap: 4px; }
+  .vk.shop[aria-pressed="true"] { background: var(--im-acc); color: #fff; }
+  .toast { position: absolute; left: 50%; bottom: calc(28px + var(--safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+           display: flex; align-items: center; gap: 18px; max-width: calc(100% - 32px); padding: 12px 18px; border-radius: 14px;
+           background: #2b2b2e; color: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.3); z-index: 20; font-size: 15px; white-space: nowrap; }
+  .toast span { overflow: hidden; text-overflow: ellipsis; }
+  .toast button { color: var(--im-acc-strong); font-weight: 700; font-size: 15px; padding: 4px 2px; min-height: 32px; }
+  .note { position: relative; }
+  .insp { margin: 0 0 16px; padding: 10px 16px 12px; background: var(--im-bg2); border-radius: 14px; }
+  .insp summary { cursor: pointer; font-weight: 600; color: var(--im-acc); list-style: none; min-height: 28px; display: flex; align-items: center; }
+  .insp summary::-webkit-details-marker { display: none; }
+  .insp input[type=search] { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 10px 12px; margin: 10px 0 8px;
+                             border-radius: 10px; border: 1px solid var(--im-line); background: var(--im-bg); color: var(--im-text); -webkit-appearance: none; }
+  .insp-faner { display: flex; gap: 6px; margin-bottom: 6px; }
+  .insp-faner button { padding: 6px 12px; border-radius: 999px; font-size: 14px; color: var(--im-dim); background: var(--im-bg); }
+  .insp-faner button[aria-pressed="true"] { color: var(--im-text); font-weight: 600; box-shadow: inset 0 0 0 1.5px var(--im-acc); }
+  .insp-liste { max-height: 46vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .ret-r { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; width: 100%; text-align: left; padding: 9px 2px; border-bottom: 1px solid var(--im-line); font: inherit; }
+  .ret-r:active { background: var(--im-bg); }
+  .rn { font-weight: 500; font-size: 16px; }
+  .rc { color: var(--im-dim); font-variant-numeric: tabular-nums; font-size: 14px; white-space: nowrap; }
+  .ri { grid-column: 1 / -1; font-size: 13px; color: var(--im-dim); }
+  .insp .fod { font-size: 13px; color: var(--im-dim); margin: 8px 0 0; }
   #cl[data-empty]::before { content: "Listen er tom. Skriv en vare ovenfor."; color: var(--im-dim); padding: 12px 0; }
   .ny-linje { color: var(--im-acc); font-weight: 600; padding: 14px 0; }
 

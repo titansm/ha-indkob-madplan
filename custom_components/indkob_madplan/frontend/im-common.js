@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.3.3";
+export const VERSION = "0.4.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -155,6 +155,16 @@ class ImStore {
   setMadplan(text, base_version) {
     return this.send("madplan/set", { text, base_version });
   }
+  /* Retter fra hele madplan-historikken (til inspiration); hentes først når der er brug for det. */
+  retter() {
+    return this.send("madplan/retter");
+  }
+  /* Gendan en slettet linje på sin gamle plads (fortryd) */
+  restore(ln, prevId) {
+    return this.send("indkob/add", {
+      text: ln.text, after_id: prevId || "__top__", line_type: ln.type, checked: !!ln.checked, restore: true,
+    });
+  }
   setSettings(changes) {
     return this.send("settings/set", changes);
   }
@@ -186,49 +196,199 @@ export function getStore(hass) {
 /* ------------------------------------------------------------------ tjekliste
  * Nøglede rækker, så et felt man skriver i ikke overskrives af fjernopdateringer. */
 export class Checklist {
-  constructor(container, store, { editable = true, hideChecked = false, onFocusLine = null, scroller = null } = {}) {
+  constructor(container, store, {
+    editable = true, hideChecked = false, onFocusLine = null, scroller = null,
+    onDelete = null, tapToggle = false, swipe = null,
+  } = {}) {
     this.el = container;
     this.store = store;
     this.editable = editable;
     this.hideChecked = hideChecked;
     this.onFocusLine = onFocusLine;
+    this.onDelete = onDelete; // (linje, forrigeId) -> kaldes efter swipe-slet, fx til "Fortryd"
+    this.tapToggle = tapToggle; // tryk hvor som helst på rækken krydser af (indkøbstilstand)
+    this.swipeEnabled = swipe ?? editable; // swipe til siden for at slette
     this.lines = [];
     this.rows = new Map();
     this.dirty = new Map(); // id -> timer
     this.focusId = null;
     this.scroller = scroller;
     this.drag = null;
+    this.swipe = null;
+    this.openRow = null;
     this._pending = null;
+    this._suppressClick = 0;
     this.el.classList.add("cl");
+    this.el.classList.toggle("tap", tapToggle);
+    // Klik lige efter et swipe/træk må ikke blive til et tryk på rækken
+    this.el.addEventListener("click", (e) => {
+      if (Date.now() < this._suppressClick) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
     this.el.addEventListener("click", (e) => this._click(e));
-    if (editable) {
-      // Træk-håndtag: flyt en vare op/ned på listen (fx ind under en anden overskrift)
-      this.el.addEventListener("pointerdown", (e) => {
-        const grip = e.target.closest(".grip");
-        if (grip && e.button === 0) this._dragStart(e, grip);
-      });
-      this.el.addEventListener("contextmenu", (e) => e.target.closest(".grip") && e.preventDefault());
-      this.el.addEventListener("input", (e) => this._input(e));
-      this.el.addEventListener("keydown", (e) => this._key(e));
-      this.el.addEventListener("focusin", (e) => {
-        const row = e.target.closest("[data-id]");
-        this.focusId = row?.dataset.id || null;
-        this.onFocusLine?.(this.focusId);
-      });
-      this.el.addEventListener("focusout", (e) => {
-        const row = e.target.closest("[data-id]");
-        if (row) this._flush(row.dataset.id);
-      });
-    }
+    this.el.addEventListener("pointerdown", (e) => this._pointerDown(e));
+    this.el.addEventListener("contextmenu", (e) => e.target.closest(".grip") && e.preventDefault());
+    this.el.addEventListener("input", (e) => this._input(e));
+    this.el.addEventListener("keydown", (e) => this._key(e));
+    this.el.addEventListener("focusin", (e) => {
+      const row = e.target.closest("[data-id]");
+      this.focusId = row?.dataset.id || null;
+      this.onFocusLine?.(this.focusId);
+    });
+    this.el.addEventListener("focusout", (e) => {
+      const row = e.target.closest("[data-id]");
+      if (row) this._flush(row.dataset.id);
+    });
+  }
+
+  /* Skift mellem redigering og indkøbstilstand (rækkerne bygges om). */
+  setMode({ editable, tapToggle = false, swipe = null }) {
+    for (const id of [...this.dirty.keys()]) this._flush(id);
+    this._closeOpen();
+    this.editable = editable;
+    this.tapToggle = tapToggle;
+    this.swipeEnabled = swipe ?? editable;
+    this.el.classList.toggle("tap", tapToggle);
+    for (const row of this.rows.values()) row.remove();
+    this.rows.clear();
+    this.render();
   }
 
   setLines(lines) {
-    if (this.drag) {
+    if (this.drag || this.swipe) {
       this._pending = lines || [];
       return;
     }
     this.lines = lines || [];
     this.render();
+  }
+
+  _pointerDown(e) {
+    if (e.button !== 0 && e.button !== undefined) return;
+    const grip = e.target.closest(".grip");
+    if (grip && this.editable) return this._dragStart(e, grip);
+    const row = e.target.closest("[data-id]");
+    if (this.openRow && this.openRow !== row) this._closeOpen();
+    if (!this.swipeEnabled || !row || this.drag || this.swipe) return;
+    if (e.pointerType === "mouse") return; // mus: markér tekst som normalt; slet med Backspace
+    if (row.dataset.type === "blank" || e.target.closest(".slet")) return;
+    this._swipeStart(e, row);
+  }
+
+  /* ------------------------------------------------------------ swipe for at slette
+   * Som i Noter: træk rækken mod venstre. Et kort træk viser "Slet", et langt træk
+   * sletter med det samme. Lodret bevægelse = almindelig scroll. */
+  _swipeStart(e, row) {
+    const inner = row.querySelector(".inner");
+    const slet = row.querySelector(".slet");
+    if (!inner || !slet) return;
+    const sw = this.swipe = {
+      row, inner, slet, id: row.dataset.id, pointerId: e.pointerId,
+      x0: e.clientX, y0: e.clientY, dx: 0, decided: false, dead: false,
+      width: row.getBoundingClientRect().width, open: this.openRow === row,
+    };
+    this._swMove = (ev) => {
+      if (this.swipe !== sw || sw.dead) return;
+      if (ev.pointerId !== undefined && ev.pointerId !== sw.pointerId) return;
+      const x = ev.clientX ?? ev.touches?.[0]?.clientX;
+      const y = ev.clientY ?? ev.touches?.[0]?.clientY;
+      if (x === undefined) return;
+      let dx = x - sw.x0 + (sw.open ? -REVEAL : 0);
+      const dy = y - sw.y0;
+      if (!sw.decided) {
+        if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(x - sw.x0)) { sw.dead = true; return; } // scroll
+        if (x - sw.x0 > 10 && !sw.open) { sw.dead = true; return; } // mod højre: ingenting
+        if (Math.abs(x - sw.x0) < 10) return;
+        sw.decided = true;
+        this._flush(sw.id);
+        const ae = this.el.getRootNode().activeElement;
+        if (ae && this.el.contains(ae)) ae.blur();
+        row.classList.add("swiping");
+        try { row.setPointerCapture?.(sw.pointerId); } catch (err) {}
+      }
+      ev.preventDefault?.();
+      if (dx > 0) dx = dx * 0.2; // lidt modstand mod højre
+      sw.dx = dx;
+      this._swipeDraw(sw, dx, false);
+    };
+    this._swUp = (ev) => {
+      if (this.swipe !== sw) return;
+      if (ev.pointerId !== undefined && ev.pointerId !== sw.pointerId) return;
+      this._swipeEnd(ev.type === "pointercancel" || ev.type === "touchcancel");
+    };
+    window.addEventListener("pointermove", this._swMove, { passive: false });
+    window.addEventListener("pointerup", this._swUp);
+    window.addEventListener("pointercancel", this._swUp);
+    window.addEventListener("touchmove", this._swMove, { passive: false });
+    window.addEventListener("touchend", this._swUp);
+    window.addEventListener("touchcancel", this._swUp);
+  }
+
+  _swipeDraw(sw, dx, animate) {
+    const t = animate ? "transform .2s ease-out" : "none";
+    sw.inner.style.transition = t;
+    sw.slet.style.transition = animate ? "width .2s ease-out" : "none";
+    sw.inner.style.transform = dx ? `translateX(${dx}px)` : "";
+    sw.slet.style.width = dx < 0 ? `${-dx}px` : "0px";
+    sw.row.classList.toggle("far", -dx > sw.width * FULL);
+  }
+
+  _swipeEnd(cancel) {
+    const sw = this.swipe;
+    if (!sw) return;
+    this.swipe = null;
+    for (const [t, f] of [["pointermove", this._swMove], ["pointerup", this._swUp], ["pointercancel", this._swUp],
+      ["touchmove", this._swMove], ["touchend", this._swUp], ["touchcancel", this._swUp]]) {
+      window.removeEventListener(t, f);
+    }
+    const pending = this._pending;
+    this._pending = null;
+    if (!sw.decided) {
+      if (pending) this.setLines(pending);
+      return;
+    }
+    this._suppressClick = Date.now() + 400;
+    const far = !cancel && -sw.dx > sw.width * FULL;
+    if (far) {
+      this._swipeDraw(sw, -sw.width, true);
+      if (navigator.vibrate) navigator.vibrate(12);
+      setTimeout(() => this._delete(sw.row, pending), 160);
+      return;
+    }
+    if (!cancel && -sw.dx > 44) {
+      this.openRow = sw.row;
+      this._swipeDraw(sw, -REVEAL, true);
+    } else {
+      this.openRow = null;
+      this._swipeDraw(sw, 0, true);
+      setTimeout(() => sw.row.classList.remove("swiping"), 220);
+    }
+    if (pending) this.setLines(pending);
+  }
+
+  _closeOpen() {
+    const row = this.openRow;
+    if (!row) return;
+    this.openRow = null;
+    const sw = { row, inner: row.querySelector(".inner"), slet: row.querySelector(".slet"), width: 1 };
+    if (sw.inner && sw.slet) this._swipeDraw(sw, 0, true);
+    setTimeout(() => row.classList.remove("swiping"), 220);
+  }
+
+  _delete(row, pending = null) {
+    const id = row.dataset.id;
+    const base = pending || this.lines;
+    const idx = base.findIndex((l) => l.id === id);
+    if (idx < 0) return this.setLines(base);
+    const ln = base[idx];
+    const prevId = idx > 0 ? base[idx - 1].id : null;
+    this.dirty.delete(id);
+    if (this.openRow === row) this.openRow = null;
+    this.setLines(base.filter((l) => l.id !== id));
+    this.store.remove([id]).catch(() => this.setLines(base));
+    this.onDelete?.(ln, prevId);
   }
 
   /* ------------------------------------------------------------ træk og slip
@@ -237,8 +397,9 @@ export class Checklist {
    * markeringslinje viser, hvor den lander. Lyttere sidder på window. */
   _dragStart(e, grip) {
     const row = grip.closest("[data-id]");
-    if (!row || this.drag) return;
+    if (!row || this.drag || this.swipe) return;
     e.preventDefault();
+    this._closeOpen();
     this._flush(row.dataset.id);
     const ae = this.el.getRootNode().activeElement;
     if (ae && this.el.contains(ae)) ae.blur();
@@ -348,6 +509,7 @@ export class Checklist {
       ["touchmove", this._onMove], ["touchend", this._onUp], ["touchcancel", this._onUp], ["blur", this._onUp]]) {
       window.removeEventListener(t, f);
     }
+    this._suppressClick = Date.now() + 400;
     const moved = !d.line.hidden;
     const before = d.before;
     d.line.remove();
@@ -397,6 +559,7 @@ export class Checklist {
     }
     for (const [id, row] of this.rows) {
       if (!seen.has(id)) {
+        if (this.openRow === row) this.openRow = null;
         row.remove();
         this.rows.delete(id);
       }
@@ -424,19 +587,22 @@ export class Checklist {
     row.className = "ln " + ln.type;
     row.dataset.id = ln.id;
     row.dataset.type = ln.type;
+    let inner;
     if (ln.type === "item") {
-      row.innerHTML = `<button class="chk" type="button" role="checkbox" aria-label="Afkryds"></button>` +
+      inner = `<button class="chk" type="button" role="checkbox" aria-label="Afkryds"></button>` +
         (this.editable
           ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />` +
             `<span class="grip" role="button" aria-label="Træk for at flytte varen" title="Træk for at flytte">${GRIP}</span>`
           : `<span class="tx"></span>`);
     } else if (ln.type === "header") {
-      row.innerHTML = this.editable
+      inner = this.editable
         ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Overskrift" />`
         : `<span class="tx"></span>`;
     } else {
-      row.innerHTML = this.editable ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Tom linje" />` : "";
+      inner = this.editable ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Tom linje" />` : "";
     }
+    row.innerHTML = `<div class="inner">${inner}</div>` +
+      (this.swipeEnabled && ln.type !== "blank" ? `<button class="slet" type="button" tabindex="-1" aria-label="Slet"><span>Slet</span></button>` : "");
     return row;
   }
 
@@ -458,9 +624,17 @@ export class Checklist {
   }
 
   _click(e) {
+    const slet = e.target.closest(".slet");
+    if (slet) {
+      e.preventDefault();
+      return this._delete(slet.closest("[data-id]"));
+    }
+    const row = e.target.closest("[data-id]");
+    if (!row) return;
+    if (this.openRow) return this._closeOpen();
     const chk = e.target.closest(".chk");
-    if (!chk) return;
-    const id = chk.closest("[data-id]").dataset.id;
+    if (!chk && !(this.tapToggle && !this.editable && row.dataset.type === "item")) return;
+    const id = row.dataset.id;
     const ln = this._line(id);
     if (!ln) return;
     ln.checked = !ln.checked; // optimistisk
@@ -545,10 +719,13 @@ export class Checklist {
   }
 }
 
+const REVEAL = 84; // bredde på "Slet" når rækken er swipet halvt
+const FULL = 0.55; // andel af rækkens bredde, der sletter med det samme
+
 const GRIP = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 8h16v1.8H4zm0 6.2h16V16H4z"/></svg>`;
 
 /* ------------------------------------------------------------------ madplan-visning */
-export function aftenHTML(mp, { compact = false, weekOpen = false, onlyToday = false } = {}) {
+export function aftenHTML(mp, { compact = false, weekOpen = false, onlyToday = false, showTomorrow = false } = {}) {
   if (!mp) return `<p class="dim">Henter madplan …</p>`;
   const dage = mp.dage || [];
   const idag = dage.find((d) => d.offset === 0);
@@ -574,20 +751,39 @@ export function aftenHTML(mp, { compact = false, weekOpen = false, onlyToday = f
   return `
     <div class="aften-top"><span class="hvornaar">I aften</span>${noter}</div>
     <div class="ret ${ret ? "" : "tom"}">${ret ? esc(ret) : "Ingen ret på madplanen"}</div>
-    ${imorgen?.ret && !onlyToday ? `<p class="imorgen">I morgen: <strong>${esc(imorgen.ret)}</strong></p>` : ""}
+    ${imorgen?.ret && (!onlyToday || showTomorrow) ? `<p class="imorgen">I morgen: <strong>${esc(imorgen.ret)}</strong>${imorgen.kraever_optoening ? ' <span class="snow-s" title="Kød op af fryseren">❄</span>' : ""}</p>` : ""}
     ${onlyToday && mp.frost_dag === "i morgen" ? "" : frost}
     ${compact || onlyToday ? "" : `<button class="link ugeknap" data-act="uge" aria-expanded="${weekOpen}">${weekOpen ? "Skjul ugen" : "Vis hele ugen"}</button>
     <ol class="uge" ${weekOpen ? "" : "hidden"}>${uge}</ol>`}`;
 }
 
-export function nyUgeSkabelon(today = new Date()) {
-  const lines = [`Uge ${isoWeek(today)}`];
-  for (let i = 0; i < 8; i++) {
-    const d = new Date(today);
+/* Skabelon til en ny uge. Den fortsætter dagen efter den sidste planlagte dag (jeres uger
+ * starter ikke nødvendigvis mandag), dog aldrig før i dag, og får ugenummeret for den dag. */
+export function nyUgeSkabelon(today = new Date(), sidsteDato = null, days = 7) {
+  let start = new Date(today);
+  start.setHours(12, 0, 0, 0);
+  if (sidsteDato) {
+    const d = new Date(sidsteDato + "T12:00:00");
+    d.setDate(d.getDate() + 1);
+    if (d > start) start = d;
+  }
+  const lines = [`Uge ${isoWeek(start)}`];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start);
     d.setDate(d.getDate() + i);
     lines.push(`${UGEDAGE[(d.getDay() + 6) % 7]}: `);
   }
   return lines.join("\n");
+}
+
+/* "for 3 uger siden", "i går", "for 4 dage siden" */
+export function sidenTekst(days) {
+  if (days == null) return "";
+  if (days === 0) return "i dag";
+  if (days === 1) return "i går";
+  if (days < 14) return `for ${days} dage siden`;
+  if (days < 56) return `for ${Math.round(days / 7)} uger siden`;
+  return `for ${Math.round(days / 30)} måneder siden`;
 }
 
 /* ------------------------------------------------------------------ statistik */
@@ -636,6 +832,27 @@ function turHTML(s) {
   return `<h3>Seneste indkøb</h3><ol class="top">${li}</ol>${extra ? `<p class="dim lille">${extra}</p>` : ""}`;
 }
 
+/* Autofuldførelse: kendte varer der matcher det, man er ved at skrive. */
+export function autofill(kendte, query, limit = 5) {
+  const q = (query || "").trim().toLowerCase();
+  if (q.length < 2) return [];
+  const starts = [], contains = [];
+  for (const n of kendte || []) {
+    const l = n.toLowerCase();
+    if (l === q) continue;
+    if (l.startsWith(q)) starts.push(n);
+    else if (l.includes(q)) contains.push(n);
+  }
+  return [...starts, ...contains].slice(0, limit);
+}
+
+export function autofillHTML(kendte, query, lines = [], limit = 5) {
+  const names = autofill(kendte, query, limit);
+  if (!names.length) return "";
+  const open = new Set(lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text.trim().toLowerCase()));
+  return names.map((n) => `<button type="button" class="chip af" data-act="autofill" data-navn="${esc(n)}">${esc(n)}${open.has(n.toLowerCase()) ? ' <small>· på listen</small>' : ""}</button>`).join("");
+}
+
 export function forslagHTML(stats, openTexts = []) {
   const open = new Set(openTexts.map((t) => t.toLowerCase()));
   const f = (stats?.forslag || []).filter((x) => !open.has(x.navn.toLowerCase())).slice(0, 8);
@@ -669,9 +886,18 @@ export const BASE_CSS = `
 
   /* tjekliste */
   .cl { display: flex; flex-direction: column; }
-  .ln { display: flex; align-items: center; gap: 12px; min-height: 44px; }
+  .ln { position: relative; overflow: hidden; touch-action: pan-y; }
+  .ln .inner { display: flex; align-items: center; gap: 12px; min-height: 44px; background: var(--im-bg); position: relative; z-index: 1; }
   .ln.item { border-bottom: 1px solid var(--im-line); }
-  .ln.blank { min-height: 14px; }
+  .ln.blank .inner { min-height: 14px; }
+  .slet { position: absolute; top: 0; right: 0; bottom: 0; width: 0; overflow: hidden; background: var(--im-slet, #e5484d);
+          color: #fff; font-weight: 600; font-size: 16px; display: flex; align-items: center; justify-content: flex-start; }
+  .slet span { flex: none; width: 84px; text-align: center; }
+  .ln.far .slet { justify-content: flex-end; }
+  .ln.swiping .inner { z-index: 2; }
+  .cl.tap .ln.item .inner { cursor: pointer; min-height: 50px; }
+  .cl.tap .ln.item .tx { font-size: 18px; }
+  .cl.tap .ln.item:active .inner { background: var(--im-bg2); }
   .ln .tx { flex: 1; min-width: 0; font: inherit; font-size: 17px; color: var(--im-text); background: transparent;
             border: 0; padding: 10px 0; outline: none; overflow-wrap: anywhere; }
   .ln.blank input.tx { padding: 0; height: 14px; font-size: 14px; }
@@ -688,7 +914,7 @@ export const BASE_CSS = `
           margin-right: -10px; color: var(--im-dim); opacity: .45; touch-action: none; cursor: grab;
           -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .grip:hover { opacity: .9; }
-  .ln.dragging { position: relative; z-index: 3; background: var(--im-bg); border-radius: 10px;
+  .ln.dragging { z-index: 3; background: var(--im-bg); border-radius: 10px; overflow: visible;
                  box-shadow: 0 6px 22px rgba(0,0,0,.22); cursor: grabbing; opacity: .88; }
   .ln.dragging .grip { opacity: 1; color: var(--im-acc); cursor: grabbing; }
   .cl.sorting { -webkit-user-select: none; user-select: none; }
@@ -725,6 +951,8 @@ export const BASE_CSS = `
   .flabel { font-size: .85rem; color: var(--im-dim); margin-right: 2px; }
   .chip { padding: 5px 11px; border-radius: 999px; border: 1px dashed var(--im-acc); color: var(--im-acc); font-size: .88rem; }
   .chip:disabled { opacity: .35; }
+  .chip.af { border-style: solid; }
+  .chip small { color: var(--im-dim); font-size: .78rem; }
 
   /* statistik */
   .stats h3 { font-size: .9rem; font-weight: 600; color: var(--im-dim); margin: 18px 0 4px; }
