@@ -16,6 +16,9 @@ Familiens indkøbsliste og madplan som to noter direkte i Home Assistant – i s
 - **Sådan virker det** – en fold-ud-forklaring nederst på indkøbslisten.
 - **Bliver på listen** – lukker iOS HA-appen i baggrunden, mens indkøbslisten er åben, vender man tilbage til listen (inden for 2 timer). Genvej direkte til listen: `homeassistant://navigate/indkob-madplan?note=indkob`.
 - **Flyt varer** – træk i ≡-håndtaget for at flytte en vare, fx ind under en anden overskrift. Nye varer med samme navn lander fremover samme sted.
+- **Faste kategorier som i butikken** – Frugt & grønt, Køl – kød, Køl – mejeri, Køl – pålæg / deli, Frost, Brød, Tørvarer, Drikkevarer, Slik & snacks, Husholdning, Baby / pleje og Ugevarer. Kategorier uden varer vises ikke; de dukker op, så snart der kommer en vare i dem.
+- **Automatisk kategori** – nye varer (fra feltet, kortet, Assist eller en automation) lander under den overskrift, de plejer at stå under – ellers gætter integrationen ud fra navnet (dansk ordliste med sammensatte ord: "kyllingebryst" → Køl – kød, "frosne ærter" → Frost). Ukendte varer lander under Ugevarer. Beskeden "Mælk → Køl – mejeri · Skift" lader en flytte varen, og valget huskes. Ingen AI-kald.
+- **＋ under hver kategori** – tilføj en vare lige præcis dér; Enter giver plads til den næste.
 - **Madplan** – formatet `Uge NN` + `Onsdag: tit nat - kylling i karry (stor portion)`. Nyeste uge øverst; en uge kan løbe fra onsdag til torsdag.
 
 ## Entiteter
