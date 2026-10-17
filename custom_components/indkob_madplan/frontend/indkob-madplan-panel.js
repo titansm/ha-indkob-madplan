@@ -2,8 +2,8 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.10.0";
-import "./im-planner.js?v=0.10.0";
+} from "./im-common.js?v=0.10.1";
+import "./im-planner.js?v=0.10.1";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -275,6 +275,7 @@ class IndkobMadplanPanel extends HTMLElement {
                 <label class="ba-felt"><span>Beløb <i id="ba-valgfrit">(valgfrit)</i></span>
                   <span class="ba-kr"><input id="ba-beloeb" type="text" inputmode="decimal" enterkeyhint="done" placeholder="0,00" /><span>kr</span></span></label>
               </div>
+              <button class="link ba-flere" type="button" data-act="ba-flere" id="ba-flere" hidden>Handlede I flere steder? Skriv beløbet pr. butik</button>
               <div class="ba-rest" id="ba-rest" hidden></div>
               <p class="ba-fejl" id="ba-fejl" hidden></p>
               <button class="ba-gem" type="submit" id="ba-gem">Afslut indkøb</button>
@@ -553,15 +554,47 @@ class IndkobMadplanPanel extends HTMLElement {
     if (!mp) return;
     if (mp.butikker.length > 1) {
       // Flere butikker: skriv beløbet pr. butik i indkøbshistorikken
-      this._saveScroll();
-      this._openTrip = mp.id;
-      this._open = "historik";
-      lsSet("open", "historik");
-      this._layout();
-      this._renderHistorik(true);
+      this._aabnTur(mp.id);
       return;
     }
     this._openArk("pris");
+  }
+
+  /* Åbn indkøbshistorikken med turen foldet ud (beløb pr. butik) */
+  _aabnTur(tripId) {
+    this._saveScroll();
+    this._openTrip = tripId;
+    this._open = "historik";
+    lsSet("open", "historik");
+    this._layout();
+    this._renderHistorik(true);
+  }
+
+  /* "Handlede I flere steder?" fra beløbs-arket: videre til historikken med
+     det, der allerede er skrevet i arket, i første række og en tom række til næste butik */
+  _flereButikker() {
+    const r = this.shadowRoot;
+    const mp = this._baMp;
+    if (!mp) return this._closeButik();
+    const butik = r.getElementById("ba-butik").value.trim();
+    const beloeb = r.getElementById("ba-beloeb").value.trim();
+    this._closeButik();
+    this._aabnTur(mp.id);
+    const box = r.querySelector(`.tur[data-tur="${CSS.escape(mp.id)}"] .tur-edit`);
+    if (!box) return;
+    const bets = box.querySelector(".bets");
+    const foerste = bets.querySelector(".bet");
+    if (foerste) {
+      const fb = foerste.querySelector(".b-butik");
+      const fk = foerste.querySelector(".b-beloeb");
+      if (butik && !fb.value) fb.value = butik;
+      if (beloeb && !fk.value) fk.value = beloeb;
+    }
+    while (bets.querySelectorAll(".bet").length < 2) bets.insertAdjacentHTML("beforeend", this._betRaekke());
+    const tom = [...bets.querySelectorAll(".bet")].find((row) => !row.querySelector(".b-butik").value.trim());
+    const felt = tom ? tom.querySelector(".b-butik") : bets.querySelector(".b-beloeb");
+    box.closest(".tur")?.scrollIntoView({ block: "start" });
+    felt?.focus();
   }
 
   /* ------------------------------------------------------------ afslut indkøb i butik (Handl) */
@@ -689,6 +722,7 @@ class IndkobMadplanPanel extends HTMLElement {
       gem.disabled = !iKurv;
     }
     r.getElementById("ba-felter").hidden = !felter;
+    r.getElementById("ba-flere").hidden = mode !== "pris";
   }
 
   /* "Færdig med at handle": ukøbte engangsvarer bliver stående – tryk på dem, der ikke skal med igen */
@@ -1371,6 +1405,8 @@ class IndkobMadplanPanel extends HTMLElement {
         .catch(() => this._setStatus("Kunne ikke gemme"));
     } else if (act === "ba-spring") {
       this._gemButik(true);
+    } else if (act === "ba-flere") {
+      this._flereButikker();
     } else if (act === "ba-rest") {
       const id = b.dataset.id;
       if (this._baFjern.has(id)) this._baFjern.delete(id);
@@ -1654,6 +1690,7 @@ const PANEL_CSS = `
   .ba-kr { display: flex; align-items: center; gap: 8px; }
   .ba-kr > span { color: var(--im-dim); font-size: 17px; }
   .ba-fejl { color: #d33; margin: 0 0 10px; font-size: 15px; }
+  .ba-flere { display: block; margin: -4px 0 14px 2px; color: var(--im-acc); font-size: 15px; text-align: left; }
   .ba-gem { display: block; width: 100%; min-height: 50px; border: 0; border-radius: 12px; font: inherit; font-size: 17px; font-weight: 700;
             color: #fff; background: var(--im-acc); cursor: pointer; }
   .ba-gem:disabled { opacity: .45; cursor: default; }
