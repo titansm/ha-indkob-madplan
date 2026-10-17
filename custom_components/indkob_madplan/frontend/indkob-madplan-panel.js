@@ -2,8 +2,8 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.8.0";
-import "./im-planner.js?v=0.8.0";
+} from "./im-common.js?v=0.9.0";
+import "./im-planner.js?v=0.9.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -53,6 +53,8 @@ class IndkobMadplanPanel extends HTMLElement {
       this._open = want;
       lsSet("open", want);
     }
+    // ?pris (fx fra en notifikation efter indkøbet) åbner "Hvad blev indkøbet?"
+    this._wantPris = new URLSearchParams(location.search).has("pris");
     this._scrollRestored = false;
     this._onHide = () => {
       if (document.visibilityState === "hidden") this._saveScroll();
@@ -122,6 +124,14 @@ class IndkobMadplanPanel extends HTMLElement {
             <section id="v-indkob" class="pane">
               <h2 class="titel">Indkøbsliste</h2>
               <p class="meta" id="meta-indkob"></p>
+              <div class="plan-cta pris-cta" id="pris-cta" hidden>
+                <button type="button" class="pr-hoved" data-act="pris-aabn">
+                  <span class="pc-ikon" aria-hidden="true">🧾</span>
+                  <span class="pc-tekst"><b>Hvad blev indkøbet?</b><small id="pris-cta-sub"></small></span>
+                  <span class="pc-pil" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="pr-luk" data-act="pris-spring" aria-label="Ingen pris – spørg ikke igen" title="Ingen pris – spørg ikke igen">×</button>
+              </div>
               <form class="hurtig" id="hurtig" autocomplete="off">
                 <input id="ny" type="text" enterkeyhint="done" placeholder="Tilføj vare …" aria-label="Tilføj vare" autocapitalize="sentences" />
               </form>
@@ -258,13 +268,17 @@ class IndkobMadplanPanel extends HTMLElement {
             <form class="kv-ark ba" role="dialog" aria-modal="true" aria-labelledby="ba-titel" id="ba-form" autocomplete="off">
               <h3 id="ba-titel">Afslut indkøb</h3>
               <p class="ba-sub" id="ba-sub"></p>
-              <div class="ba-chips" id="ba-chips"></div>
-              <label class="ba-felt"><span>Butik</span>
-                <input id="ba-butik" type="text" autocapitalize="words" enterkeyhint="next" placeholder="Fx Netto" maxlength="60" /></label>
-              <label class="ba-felt"><span>Beløb <i>(valgfrit)</i></span>
-                <span class="ba-kr"><input id="ba-beloeb" type="text" inputmode="decimal" enterkeyhint="done" placeholder="0,00" /><span>kr</span></span></label>
+              <div id="ba-felter">
+                <div class="ba-chips" id="ba-chips"></div>
+                <label class="ba-felt"><span>Butik</span>
+                  <input id="ba-butik" type="text" autocapitalize="words" enterkeyhint="next" placeholder="Fx Netto" maxlength="60" /></label>
+                <label class="ba-felt"><span>Beløb <i id="ba-valgfrit">(valgfrit)</i></span>
+                  <span class="ba-kr"><input id="ba-beloeb" type="text" inputmode="decimal" enterkeyhint="done" placeholder="0,00" /><span>kr</span></span></label>
+              </div>
+              <div class="ba-rest" id="ba-rest" hidden></div>
               <p class="ba-fejl" id="ba-fejl" hidden></p>
               <button class="ba-gem" type="submit" id="ba-gem">Afslut indkøb</button>
+              <button class="link ba-fortryd" type="button" data-act="ba-spring" id="ba-spring" hidden></button>
               <button class="link ba-fortryd" type="button" data-act="ba-fortryd" id="ba-fortryd" hidden>Fortryd – varerne kommer tilbage i kurven</button>
               <button class="kv-luk" type="button" data-act="ba-luk">Annullér</button>
             </form>
@@ -300,7 +314,7 @@ class IndkobMadplanPanel extends HTMLElement {
       editable: true,
       checkbox: false,
       swipe: true,
-      onFocusLine: (id) => { this._focusLine = id; this._focusNote = "basis"; },
+      onFocusLine: (id) => { this._focusLine = id; this._focusNote = "basis"; this._updateFastBtn(); },
       scroller: r.getElementById("ark"),
       onDelete: (ln, prevId) => this._deleted(ln, prevId, "basis"),
       plus: true,
@@ -311,7 +325,8 @@ class IndkobMadplanPanel extends HTMLElement {
       e.preventDefault();
       this._gemButik();
     });
-    r.getElementById("ba-butik").addEventListener("input", () => this._markChip());
+    r.getElementById("ba-butik").addEventListener("input", () => { this._markChip(); r.getElementById("ba-fejl").hidden = true; });
+    r.getElementById("ba-beloeb").addEventListener("input", () => (r.getElementById("ba-fejl").hidden = true));
     r.getElementById("ba-butik").addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -465,17 +480,19 @@ class IndkobMadplanPanel extends HTMLElement {
     if (open === "indkob") {
       t.innerHTML = `
         <button class="vk shop" data-act="handl" aria-pressed="${this._shop}" title="Indkøbstilstand: tryk på varen for at krydse af">${this._shop ? "Rediger" : ICON_CART + "<span>Handl</span>"}</button>
-        ${this._shop ? "" : `<button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>
+        ${this._shop ? "" : `<button class="vk ovs-knap" data-act="overskrift" aria-pressed="false" title="Gør den markerede linje til overskrift (eller tilbage til vare)">${ICON_OVS}<span>Overskrift</span></button>
         <button class="vk fast-knap" data-act="fast" aria-pressed="false" title="Gør den markerede vare fast (i basislisten) eller engangs">${PIN}<span>Fast</span></button>`}
-        <button class="vk" data-act="skjul" aria-pressed="${this._hideChecked}" title="Skjul afkrydsede">${this._hideChecked ? "Vis alle" : "Skjul købte"}</button>
+        ${this._shop ? `<button class="vk" data-act="skjul" aria-pressed="${this._hideChecked}" title="Skjul afkrydsede">${this._hideChecked ? "Vis alle" : "Skjul købte"}</button>` : ""}
         <button class="vk" data-act="mere" aria-haspopup="true" aria-label="Flere handlinger">${ICON_MORE}</button>
         <div class="menu-pop" id="pop" hidden>
+          <button data-act="fjern-flueben">Færdig med at handle …</button>
+          ${this._shop ? "" : `<button data-act="skjul">${this._hideChecked ? "Vis afkrydsede varer" : "Skjul afkrydsede varer"}</button>`}
           <button data-act="fjern-afkrydsede">Slet afkrydsede varer</button>
-          <button data-act="fjern-flueben">Færdig med at handle – nulstil til basislisten</button>
         </div>`;
       this._updateFastBtn();
     } else if (open === "basis") {
-      t.innerHTML = `<button class="vk" data-act="overskrift" title="Gør linjen til overskrift / vare">Aa</button>`;
+      t.innerHTML = `<button class="vk ovs-knap" data-act="overskrift" aria-pressed="false" title="Gør den markerede linje til overskrift (eller tilbage til vare)">${ICON_OVS}<span>Overskrift</span></button>`;
+      this._updateFastBtn();
     } else if (open === "madplan") {
       t.innerHTML = `<button class="vk" data-act="planlaeg" title="Forslag til næste uges madplan">Planlæg</button>
         <button class="vk" data-act="ny-uge" title="Indsæt en tom uge øverst">Ny uge</button>`;
@@ -506,7 +523,45 @@ class IndkobMadplanPanel extends HTMLElement {
     r.getElementById("forslag").innerHTML = forslagHTML(s.stats, open);
     this._renderAutofill();
     this._renderButikFod(tur, iKurv, tilbage, kl);
-    if (!r.getElementById("butikark").hidden && !this._baStop) this._renderButikSub(iKurv);
+    this._renderPrisCta();
+    if (!r.getElementById("butikark").hidden) {
+      this._renderArkSub();
+      this._renderRest();
+    }
+  }
+
+  /* ------------------------------------------------------------ "Hvad blev indkøbet?" */
+  _renderPrisCta() {
+    const r = this.shadowRoot;
+    const mp = this._state?.historik?.mangler_pris;
+    const el = r.getElementById("pris-cta");
+    el.hidden = !mp;
+    if (mp) {
+      const hvor = mp.butikker.filter(Boolean).join(" + ");
+      r.getElementById("pris-cta-sub").textContent =
+        `${dagTid(mp.t)} · ${mp.antal} ${mp.antal === 1 ? "vare" : "varer"}${hvor ? " · " + hvor : ""}`
+        + (mp.butikker.length > 1 ? ` – ${(mp.mangler || []).filter(Boolean).join(", ") || "en butik"} mangler beløb` : " – skriv beløbet");
+    }
+    if (this._wantPris && this._state) {
+      this._wantPris = false;
+      if (mp) requestAnimationFrame(() => this._openPris());
+    }
+  }
+
+  _openPris() {
+    const mp = this._state?.historik?.mangler_pris;
+    if (!mp) return;
+    if (mp.butikker.length > 1) {
+      // Flere butikker: skriv beløbet pr. butik i indkøbshistorikken
+      this._saveScroll();
+      this._openTrip = mp.id;
+      this._open = "historik";
+      lsSet("open", "historik");
+      this._layout();
+      this._renderHistorik(true);
+      return;
+    }
+    this._openArk("pris");
   }
 
   /* ------------------------------------------------------------ afslut indkøb i butik (Handl) */
@@ -524,9 +579,11 @@ class IndkobMadplanPanel extends HTMLElement {
       : stops.length
         ? `<p class="bf-hint">${tilbage ? "Handler I videre i en anden butik, så kryds varerne af og afslut igen." : "Alt på listen er købt."}${tur?.nulstilles ? ` Fluebenene fjernes ca. kl. ${kl(tur.nulstilles)}.` : ""}</p>`
         : `<p class="bf-hint">Kryds de varer af, I lægger i kurven – afslut, når I har betalt.</p>`;
+    const faerdig = iKurv || stops.length
+      ? `<button type="button" class="bf-faerdig" data-act="faerdig">Færdig med at handle – nulstil listen</button>` : "";
     el.innerHTML = `${liste ? `<div class="bf-liste">${liste}</div>` : ""}
       <button type="button" class="bf-knap" data-act="ba-aabn" ${iKurv ? "" : "disabled"}>${ICON_CART}<span>Afslut indkøb i butik${iKurv ? ` (${varer(iKurv)})` : ""}</span></button>
-      ${hint}`;
+      ${hint}${faerdig}`;
   }
 
   _butikNavne() {
@@ -537,36 +594,129 @@ class IndkobMadplanPanel extends HTMLElement {
     return navne.slice(0, 8);
   }
 
-  _renderButikSub(iKurv) {
-    const r = this.shadowRoot;
-    r.getElementById("ba-sub").textContent = iKurv
-      ? `${iKurv} ${iKurv === 1 ? "vare" : "varer"} i kurven gemmes som købt i butikken.`
-      : "Ingen nye varer i kurven.";
-    r.getElementById("ba-gem").disabled = !iKurv;
+  /* Varer i kurven, der endnu ikke er gemt i en butik */
+  _iKurv() {
+    const s = this._state;
+    if (!s) return 0;
+    const koebt = s.indkob.tur?.koebt || {};
+    return s.indkob.lines.filter((l) => l.type === "item" && l.text.trim() && l.checked && !koebt[l.id]).length;
   }
 
   _openButik(stopId = null) {
+    this._openArk(stopId ? "ret" : "butik", { stopId });
+  }
+
+  /* Ét ark til fire trin på rejsen:
+     butik   – Afslut indkøb i butik (Handl): butik + beløb for varerne i kurven
+     ret     – ret en afsluttet butik på turen
+     faerdig – Færdig med at handle: butik + beløb (kan springes over) → listen nulstilles
+     pris    – Hvad blev indkøbet? (seneste indkøb uden beløb) */
+  _openArk(mode, { stopId = null } = {}) {
     const r = this.shadowRoot;
-    const tur = this._state?.indkob.tur || {};
+    const s = this._state;
+    if (!s) return;
+    const tur = s.indkob.tur || {};
     const st = stopId ? (tur.butikker || []).find((x) => x.id === stopId) : null;
-    if (stopId && !st) return;
-    this._baStop = stopId;
-    r.getElementById("ba-titel").textContent = st ? `Indkøbet i ${st.butik}` : "Afslut indkøb i butik";
-    if (st) r.getElementById("ba-sub").textContent = `${st.antal} ${st.antal === 1 ? "vare" : "varer"} · ret butik eller beløb`;
-    else {
-      const items = this._state.indkob.lines.filter((l) => l.type === "item" && l.text.trim());
-      this._renderButikSub(items.filter((l) => l.checked && !(tur.koebt || {})[l.id]).length);
+    if (mode === "ret" && !st) return;
+    const mp = s.historik?.mangler_pris;
+    if (mode === "pris" && !mp) return;
+    this._baMode = mode;
+    this._baStop = st ? stopId : null;
+    this._baMp = mode === "pris" ? mp : null;
+    this._baFjern = new Set();
+    r.getElementById("ba-titel").textContent = {
+      butik: "Afslut indkøb i butik", ret: `Indkøbet i ${st?.butik}`, faerdig: "Færdig med at handle", pris: "Hvad blev indkøbet?",
+    }[mode];
+    r.getElementById("ba-valgfrit").hidden = mode === "pris";
+    let butik = "";
+    let beloeb = "";
+    if (st) {
+      butik = st.butik;
+      beloeb = st.beloeb ? String(st.beloeb).replace(".", ",") : "";
     }
-    r.getElementById("ba-gem").textContent = st ? "Gem" : "Afslut indkøb";
-    if (st) r.getElementById("ba-gem").disabled = false;
-    r.getElementById("ba-fortryd").hidden = !st;
-    r.getElementById("ba-fejl").hidden = true;
-    r.getElementById("ba-butik").value = st ? st.butik : "";
-    r.getElementById("ba-beloeb").value = st && st.beloeb ? String(st.beloeb).replace(".", ",") : "";
+    if (mode === "pris" && mp.butikker.length === 1) butik = mp.butikker[0];
+    r.getElementById("ba-butik").value = butik;
+    r.getElementById("ba-beloeb").value = beloeb;
     r.getElementById("ba-chips").innerHTML = this._butikNavne()
       .map((n) => `<button type="button" class="ba-chip" data-act="ba-chip" data-navn="${esc(n)}">${esc(n)}</button>`).join("");
     this._markChip();
+    r.getElementById("ba-fortryd").hidden = mode !== "ret";
+    r.getElementById("ba-fejl").hidden = true;
+    this._renderArkSub();
+    this._renderRest();
     r.getElementById("butikark").hidden = false;
+    r.querySelector("#butikark .kv-ark").scrollTop = 0;
+  }
+
+  _renderArkSub() {
+    const r = this.shadowRoot;
+    const s = this._state;
+    const mode = this._baMode;
+    const tur = s.indkob.tur || {};
+    const iKurv = this._iKurv();
+    const varer = (n) => `${n} ${n === 1 ? "vare" : "varer"}`;
+    const sub = r.getElementById("ba-sub");
+    const gem = r.getElementById("ba-gem");
+    const spring = r.getElementById("ba-spring");
+    let felter = true;
+    spring.hidden = true;
+    gem.disabled = false;
+    if (mode === "ret") {
+      const st = (tur.butikker || []).find((x) => x.id === this._baStop);
+      if (st) sub.textContent = `${varer(st.antal)} · ret butik eller beløb`;
+      gem.textContent = "Gem";
+    } else if (mode === "pris") {
+      const mp = this._baMp;
+      const hvor = mp.butikker.filter(Boolean).join(" + ");
+      sub.textContent = `${dagTid(mp.t)} · ${varer(mp.antal)}${hvor ? " · " + hvor : ""}`;
+      gem.textContent = "Gem beløbet";
+      spring.hidden = false;
+      spring.textContent = "Ingen pris – spørg ikke igen";
+    } else if (mode === "faerdig") {
+      const gemt = (tur.butikker || []).map((st) => st.butik + (st.beloeb ? " " + kr(st.beloeb) : "")).join(" · ");
+      felter = iKurv > 0;
+      sub.textContent = iKurv
+        ? `${varer(iKurv)} i kurven. Hvor handlede I, og hvad blev det?${gemt ? ` (Gemt på turen: ${gemt}.)` : ""}`
+        : gemt
+          ? `Gemt på turen: ${gemt}.`
+          : "Ingen varer er krydset af – listen sættes bare tilbage til basislisten.";
+      gem.textContent = iKurv ? "Gem og nulstil listen" : "Nulstil listen";
+      spring.hidden = !iKurv;
+      spring.textContent = "Spring over – nulstil uden butik og beløb";
+    } else {
+      sub.textContent = iKurv ? `${varer(iKurv)} i kurven gemmes som købt i butikken.` : "Ingen nye varer i kurven.";
+      gem.textContent = "Afslut indkøb";
+      gem.disabled = !iKurv;
+    }
+    r.getElementById("ba-felter").hidden = !felter;
+  }
+
+  /* "Færdig med at handle": ukøbte engangsvarer bliver stående – tryk på dem, der ikke skal med igen */
+  _renderRest() {
+    const r = this.shadowRoot;
+    const el = r.getElementById("ba-rest");
+    if (this._baMode !== "faerdig") {
+      el.hidden = true;
+      el.innerHTML = "";
+      return;
+    }
+    const rest = this._state.indkob.lines.filter((l) => l.type === "item" && l.text.trim() && !l.checked && !l.fast);
+    const ids = new Set(rest.map((l) => l.id));
+    for (const id of [...this._baFjern]) if (!ids.has(id)) this._baFjern.delete(id);
+    el.hidden = !rest.length;
+    if (!rest.length) {
+      el.innerHTML = "";
+      return;
+    }
+    const n = this._baFjern.size;
+    const alle = n === rest.length;
+    el.innerHTML = `<div class="br-top"><span>Ikke købt – bliver på listen</span>
+        <button type="button" class="link" data-act="ba-rest-alle">${alle ? "Behold alle" : "Fjern alle"}</button></div>
+      <div class="br-chips">${rest.map((l) => {
+        const f = this._baFjern.has(l.id);
+        return `<button type="button" class="br-chip${f ? " fjern" : ""}" data-act="ba-rest" data-id="${esc(l.id)}" aria-pressed="${f}">${esc(l.text)}</button>`;
+      }).join("")}</div>
+      <p class="br-hint">${n ? `${n} ${n === 1 ? "engangsvare fjernes" : "engangsvarer fjernes"} fra listen. Tryk igen for at beholde.` : "Tryk på de engangsvarer, der ikke skal med næste gang."}</p>`;
   }
 
   _markChip() {
@@ -580,6 +730,8 @@ class IndkobMadplanPanel extends HTMLElement {
     r.getElementById("butikark").hidden = true;
     for (const id of ["ba-butik", "ba-beloeb"]) r.getElementById(id).blur();
     this._baStop = null;
+    this._baMode = null;
+    this._baMp = null;
   }
 
   _baFejl(t) {
@@ -588,13 +740,17 @@ class IndkobMadplanPanel extends HTMLElement {
     el.hidden = false;
   }
 
-  async _gemButik() {
+  async _gemButik(spring = false) {
     const r = this.shadowRoot;
-    const butik = r.getElementById("ba-butik").value.trim();
-    const rå = r.getElementById("ba-beloeb").value.trim();
-    if (!butik) return this._baFejl("Vælg eller skriv butikken.");
+    const mode = this._baMode;
+    const felter = !r.getElementById("ba-felter").hidden;
+    const butik = spring || !felter ? "" : r.getElementById("ba-butik").value.trim();
+    const rå = spring || !felter ? "" : r.getElementById("ba-beloeb").value.trim();
     const beloeb = rå ? parseKr(rå) : null;
     if (rå && beloeb === null) return this._baFejl("Beløbet kan ikke læses – skriv fx 234,50.");
+    if (mode === "faerdig") return this._gemFaerdig(butik, beloeb, spring);
+    if (mode === "pris") return this._gemPris(butik, beloeb, spring);
+    if (!butik) return this._baFejl("Vælg eller skriv butikken.");
     const stopId = this._baStop;
     const data = { butik, ...(beloeb !== null ? { beloeb } : {}) };
     r.getElementById("ba-gem").disabled = true;
@@ -620,6 +776,57 @@ class IndkobMadplanPanel extends HTMLElement {
     }
   }
 
+  /* Færdig med at handle: (butik + beløb) → listen nulstilles til basislisten */
+  async _gemFaerdig(butik, beloeb, spring) {
+    const r = this.shadowRoot;
+    if (beloeb !== null && !butik) return this._baFejl("Vælg eller skriv butikken – eller tryk Spring over.");
+    const fjern = [...this._baFjern];
+    const gem = r.getElementById("ba-gem");
+    gem.disabled = true;
+    try {
+      const res = await this._store.send("indkob/uncheck_all", {
+        ...(butik ? { butik } : {}),
+        ...(beloeb !== null ? { beloeb } : {}),
+        ...(fjern.length ? { fjern } : {}),
+      });
+      if (spring && res?.trip_id) await this._store.send("trip/spring_pris", { trip_id: res.trip_id }).catch(() => {});
+      this._closeButik();
+      if (navigator.vibrate) navigator.vibrate(12);
+      const dele = ["Listen er sat tilbage til basislisten"];
+      if (butik) dele.push(`${butik}${beloeb ? " " + kr(beloeb) : ""} gemt`);
+      if (fjern.length) dele.push(`${fjern.length} ${fjern.length === 1 ? "engangsvare" : "engangsvarer"} fjernet`);
+      this._toast(dele.join(" · "), { ms: 5000 });
+    } catch (err) {
+      gem.disabled = false;
+      this._baFejl(err?.message || "Kunne ikke nulstille listen – prøv igen.");
+    }
+  }
+
+  /* Hvad blev indkøbet? – beløbet skrives på indkøbet i historikken */
+  async _gemPris(butik, beloeb, spring) {
+    const r = this.shadowRoot;
+    const mp = this._baMp;
+    if (!mp) return this._closeButik();
+    const gem = r.getElementById("ba-gem");
+    try {
+      if (spring) {
+        await this._store.send("trip/spring_pris", { trip_id: mp.id });
+        this._closeButik();
+        this._setStatus("OK – indkøbet står uden pris");
+        return;
+      }
+      if (!beloeb) return this._baFejl("Skriv beløbet – eller tryk Ingen pris.");
+      gem.disabled = true;
+      await this._store.updateTrip(mp.id, [{ butik, beloeb }]);
+      this._closeButik();
+      if (navigator.vibrate) navigator.vibrate(12);
+      this._toast(`${butik || "Indkøbet"}: ${kr(beloeb)} gemt i indkøbshistorikken`, { ms: 4000 });
+    } catch (err) {
+      gem.disabled = false;
+      this._baFejl(err?.message || "Kunne ikke gemme – prøv igen.");
+    }
+  }
+
   /* ------------------------------------------------------------ basisliste */
   _renderBasis() {
     const s = this._state;
@@ -633,6 +840,18 @@ class IndkobMadplanPanel extends HTMLElement {
 
   /* Knappen "Fast" i værktøjslinjen viser, om den markerede vare er fast. */
   _updateFastBtn() {
+    // Overskrift: trykket ind, når den markerede linje er en overskrift
+    const ovs = this.shadowRoot?.querySelector(".ovs-knap");
+    if (ovs) {
+      const note = this._focusNote === "basis" ? this._state?.basis : this._state?.indkob;
+      const sameNote = (this._focusNote === "basis") === (this._open === "basis");
+      const l = sameNote ? note?.lines.find((x) => x.id === this._focusLine) : null;
+      ovs.disabled = !l;
+      ovs.setAttribute("aria-pressed", String(l?.type === "header"));
+      ovs.title = !l ? "Markér en linje først" : l.type === "header"
+        ? "Overskrift – tryk for at gøre linjen til en almindelig vare igen"
+        : "Gør den markerede linje til overskrift";
+    }
     const btn = this.shadowRoot?.querySelector(".fast-knap");
     if (!btn) return;
     const ln = this._focusNote === "indkob" ? this._state?.indkob.lines.find((l) => l.id === this._focusLine) : null;
@@ -775,14 +994,15 @@ class IndkobMadplanPanel extends HTMLElement {
       <p><b>Basislisten.</b> Efter hvert indkøb nulstilles listen til basislisten (Noter → <button class="link" data-note="basis">Basisliste</button>): fluebenene fjernes, købte engangsvarer forsvinder, og faste varer, der mangler, kommer tilbage. Engangsvarer er mærket <i>Engangs</i> – tryk på mærket for at gøre varen fast; <i>Fast</i> i værktøjslinjen skifter for den markerede vare.</p>
       <p><b>Kryds af, når varen ryger i kurven.</b> Hvert flueben tæller som et køb i statistikken. Fjerner du et flueben igen inden for 12 timer, regnes det som fortrudt.</p>
       <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
-      <p><b>Færdig før tid?</b> ⋯ → "Færdig med at handle" nulstiller listen til basislisten med det samme. "Slet afkrydsede varer" fjerner de afkrydsede varer – faste varer kommer dog tilbage.</p>
+      <p><b>Færdig med at handle</b> (nederst i Handl eller under ⋯): skriv butik og beløb – eller spring over – så sættes listen tilbage til basislisten med det samme. Engangsvarer, der ikke blev købt, bliver stående; tryk på dem i arket, hvis de ikke skal med næste gang. "Slet afkrydsede varer" fjerner de afkrydsede varer – faste varer kommer dog tilbage.</p>
+      <p><b>Hvad blev indkøbet?</b> Mangler det seneste indkøb et beløb (fx når listen er nulstillet automatisk), står der et kort øverst på listen. Tryk på det og skriv beløbet, eller × hvis det ikke skal have en pris.</p>
       <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
-      <p><b>Afslut indkøb i butik:</b> når I har betalt, så tryk på knappen nederst i listen, vælg butikken og skriv evt. beløbet. Varerne gemmes som købt i den butik og forsvinder fra listen, så kun det, der mangler, står tilbage. Handler I videre i en anden butik, gør I bare det samme dér – det er ikke et krav. ${tim[0].toUpperCase() + tim.slice(1)} efter sidste butik fjernes fluebenene. Glemmer I knappen, registreres indkøbet stadig automatisk (uden butik og pris).</p>
+      <p><b>Afslut indkøb i butik:</b> når I har betalt, så tryk på knappen nederst i listen, vælg butikken og skriv evt. beløbet. Varerne gemmes som købt i den butik og forsvinder fra listen, så kun det, der mangler, står tilbage. Handler I videre i en anden butik, gør I bare det samme dér – det er ikke et krav. ${tim[0].toUpperCase() + tim.slice(1)} efter sidste butik fjernes fluebenene. Glemmer I knappen, registreres indkøbet stadig automatisk – så spørger kortet øverst på listen bagefter, hvad det blev.</p>
       <p><b>Nye varer</b> er engangsvarer (tryk <i>Fast</i> i beskeden, hvis de skal blive på listen): skriv i feltet øverst, så finder listen selv kategorien – den overskrift varen plejer at stå under, ellers et gæt ud fra navnet (mælk → Køl – mejeri, kyllingebryst → Køl – kød). Ved ukendte varer bliver det Ugevarer. Tryk på <i>Skift</i> i beskeden nederst, hvis den landede forkert – så huskes det til næste gang.</p>
       <p><b>＋ under en kategori</b> tilføjer en vare lige præcis dér. Enter giver plads til den næste. Kategorier uden varer vises ikke – de dukker op, så snart der kommer en vare i dem.</p>
       <p>Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
       <p><b>Slet en linje:</b> swipe den mod venstre (kort = vis Slet, langt = slet med det samme). Fortryd nederst på skærmen i et par sekunder. Backspace på en tom linje sletter den også.</p>
-      <p><b>Overskrifter:</b> Aa gør linjen til overskrift. Enter giver en ny linje.</p>
+      <p><b>Overskrifter:</b> markér en linje og tryk <i>Overskrift</i> øverst – tryk igen for at gøre den til en vare. Enter giver en ny linje.</p>
       <p><b>Forslag</b> over listen er varer, I plejer at købe, som mangler nu. Tryk for at tilføje.</p>
       <p><b>Indkøbshistorik:</b> hver indkøbstur gemmes med dato og varer. Tryk på turen for at skrive butik og pris – flere butikker pr. tur går fint. Handler I uden listen, kan I tilføje indkøbet selv.</p>
       <p><b>Redigeringslog:</b> viser hvem der har tilføjet, rettet, krydset af eller slettet hvad.</p>
@@ -1139,9 +1359,28 @@ class IndkobMadplanPanel extends HTMLElement {
       pop.hidden = true;
       const n = this._state.indkob.lines.filter((l) => l.type === "item" && l.checked).length;
       if (n) await this._store.clearChecked();
-    } else if (act === "fjern-flueben") {
-      pop.hidden = true;
-      await this._store.uncheckAll();
+    } else if (act === "fjern-flueben" || act === "faerdig") {
+      if (pop) pop.hidden = true;
+      this._openArk("faerdig");
+    } else if (act === "pris-aabn") {
+      this._openPris();
+    } else if (act === "pris-spring") {
+      const mp = this._state?.historik?.mangler_pris;
+      if (mp) this._store.send("trip/spring_pris", { trip_id: mp.id })
+        .then(() => this._toast("Indkøbet står uden pris – beløbet kan altid skrives i Indkøbshistorik", { ms: 4500 }))
+        .catch(() => this._setStatus("Kunne ikke gemme"));
+    } else if (act === "ba-spring") {
+      this._gemButik(true);
+    } else if (act === "ba-rest") {
+      const id = b.dataset.id;
+      if (this._baFjern.has(id)) this._baFjern.delete(id);
+      else this._baFjern.add(id);
+      this._renderRest();
+    } else if (act === "ba-rest-alle") {
+      const rest = this._state.indkob.lines.filter((l) => l.type === "item" && l.text.trim() && !l.checked && !l.fast);
+      const alle = rest.length && rest.every((l) => this._baFjern.has(l.id));
+      this._baFjern = alle ? new Set() : new Set(rest.map((l) => l.id));
+      this._renderRest();
     } else if (act === "overskrift") {
       const id = this._focusLine;
       const note = this._focusNote === "basis" ? "basis" : "indkob";
@@ -1283,6 +1522,7 @@ class IndkobMadplanPanel extends HTMLElement {
 const ICON_MENU = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2Z"/></svg>`;
 const ICON_BACK = `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M15.4 4.6 8 12l7.4 7.4-1.4 1.4L5.2 12 14 3.2z"/></svg>`;
 const ICON_CART = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M7 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4m10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4M7.2 14.8l.03-.12.9-1.68h7.45c.75 0 1.41-.41 1.75-1.03l3.86-7.01L19.42 4h-.01l-1.1 2-2.76 5H8.53l-.13-.27L6.16 6l-.95-2-.94-2H1v2h2l3.6 7.59-1.35 2.45c-.16.28-.25.61-.25.96a2 2 0 0 0 2 2h12v-2H7.42a.25.25 0 0 1-.22-.2Z"/></svg>`;
+const ICON_OVS = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 4h2.4v6.8h6.2V4H14v16h-2.4v-6.9H5.4V20H3V4Zm13 10h5v2h-5v-2Zm0 4h5v2h-5v-2Z"/></svg>`;
 const ICON_MORE = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M12 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3m-6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3m12 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3"/></svg>`;
 
 const PANEL_CSS = `
@@ -1304,12 +1544,15 @@ const PANEL_CSS = `
   .vaerktoej { display: flex; align-items: center; gap: 2px; position: relative; }
   .vk { color: var(--im-acc); font-weight: 600; min-height: 44px; min-width: 44px; padding: 0 8px; border-radius: 8px; }
   .vk[aria-pressed="true"] { background: color-mix(in srgb, var(--im-acc) 14%, transparent); }
+  .smal .vk { padding: 0 6px; }
+  .smal .vk[data-act=mere] { min-width: 36px; }
+  @media (max-width: 385px) { .smal .tilbage span { display: none; } }
   .menu-pop { position: absolute; right: 0; top: 46px; background: var(--im-bg); border: 1px solid var(--im-line);
               border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.18); display: flex; flex-direction: column; min-width: 220px; z-index: 5; overflow: hidden; }
   .menu-pop button { text-align: left; padding: 13px 16px; font-size: 16px; }
   .menu-pop button + button { border-top: 1px solid var(--im-line); }
-  .menu-pop button:last-child { color: var(--im-acc); }
-  .menu-pop button:first-child { color: var(--error-color, #d93025); }
+  .menu-pop [data-act=fjern-flueben] { color: var(--im-acc); font-weight: 600; }
+  .menu-pop [data-act=fjern-afkrydsede] { color: var(--error-color, #d93025); }
 
   .noter { display: flex; flex-direction: column; padding: 4px 12px 24px; gap: 0; }
   .nr { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left; padding: 12px 14px;
@@ -1332,6 +1575,8 @@ const PANEL_CSS = `
   .vk.shop { display: inline-flex; align-items: center; gap: 4px; }
   .vk.fast-knap { display: inline-flex; align-items: center; gap: 3px; }
   .vk.fast-knap:disabled { opacity: .4; }
+  .vk.ovs-knap { display: inline-flex; align-items: center; gap: 3px; }
+  .vk.ovs-knap:disabled { opacity: .4; }
   .basis-intro { font-size: 15px; line-height: 1.45; color: var(--im-dim); margin: 0 0 12px; }
   #cl-basis { margin-top: 8px; }
   #af-basis:not(:empty) { margin: 8px 0 0; }
@@ -1417,6 +1662,20 @@ const PANEL_CSS = `
   .plan-cta { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin: -4px 0 16px; padding: 12px 14px;
               border-radius: 14px; background: color-mix(in srgb, var(--im-acc-strong) 20%, var(--im-bg2)); }
   .plan-cta:active { filter: brightness(.96); }
+  .pris-cta { padding: 0; gap: 0; margin: 0 0 14px; }
+  .pris-cta[hidden] { display: none; }
+  .pr-hoved { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; padding: 12px 4px 12px 14px; text-align: left; }
+  .pr-luk { flex: none; min-width: 44px; min-height: 44px; font-size: 24px; line-height: 1; color: var(--im-dim); }
+  .bf-faerdig { display: block; width: 100%; min-height: 48px; margin-top: 12px; border-radius: 14px; border: 1px solid var(--im-line);
+                font-size: 16px; font-weight: 600; color: var(--im-acc); }
+  .ba-rest { margin: 2px 0 14px; }
+  .ba-rest[hidden] { display: none; }
+  .br-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--im-dim); margin: 0 2px 6px; }
+  .br-top .link { font-size: 14px; }
+  .br-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .br-chip { min-height: 34px; padding: 0 12px; border-radius: 17px; border: 1px solid var(--im-line); background: var(--im-bg2); font-size: 15px; }
+  .br-chip.fjern { text-decoration: line-through; color: var(--im-dim); border-style: dashed; background: transparent; }
+  .br-hint { margin: 8px 2px 0; font-size: 13.5px; color: var(--im-dim); line-height: 1.35; }
   .pc-ikon { font-size: 24px; line-height: 1; }
   .pc-tekst { display: flex; flex-direction: column; flex: 1; min-width: 0; }
   .pc-tekst b { font-size: 17px; }
