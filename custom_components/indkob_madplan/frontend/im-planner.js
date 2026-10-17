@@ -4,7 +4,7 @@
  * mærk travle aftener (nattevagt, fodbold …), lås det I vil beholde, og bland resten om.
  * "Gem i madplanen" skriver ugen øverst i madplan-noten i jeres eget format.
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.9.0";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.10.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];

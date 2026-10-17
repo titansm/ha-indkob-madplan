@@ -1,12 +1,12 @@
 /* Indkøb & Madplan – dashboard-kort
  * type: custom:indkob-madplan-card
  * valgfrit: vis_madplan (true), vis_liste (true), vis_statistik (true), skjul_koebte (true),
- *           kun_i_dag (false) – vis kun dagens ret; tryk på retten åbner noterne
- *           hurtig_tilfoej (true) – med kun_i_dag: felt til at tilføje varer til indkøbslisten
- *           forslag (true) – med kun_i_dag: "plejer I at købe"-knapper under feltet
+ *           kun_i_dag (false) – kompakt række med dagens ret; tryk åbner noterne
+ *           hurtig_tilfoej (true) – med kun_i_dag: ＋-knap der folder et felt ud til indkøbslisten
+ *           forslag (true) – med kun_i_dag: "plejer I at købe"-knapper i det udfoldede felt
  *           vis_i_morgen (false) – med kun_i_dag: også morgendagens ret
  */
-import * as C from "./im-common.js?v=0.9.0";
+import * as C from "./im-common.js?v=0.10.0";
 
 // Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
 C.resumeIfShopping();
@@ -17,6 +17,7 @@ class IndkobMadplanCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._tab = "liste";
     this._weekOpen = false;
+    this._addOpen = false;
     this._built = false;
   }
 
@@ -31,7 +32,7 @@ class IndkobMadplanCard extends HTMLElement {
     return {};
   }
   getCardSize() {
-    return this._config?.kun_i_dag ? (this._config.hurtig_tilfoej ? 3 : 2) : 8;
+    return this._config?.kun_i_dag ? 1 : 8;
   }
   getGridOptions() {
     return this._config?.kun_i_dag ? { columns: 12, min_columns: 3, rows: "auto" } : { columns: 12, min_columns: 6, rows: "auto" };
@@ -66,15 +67,27 @@ class IndkobMadplanCard extends HTMLElement {
     const r = this.shadowRoot;
     r.innerHTML = `<style>${C.BASE_CSS}${CARD_CSS}</style>
       <ha-card>
-        <section class="aften" id="aften"></section>
-        <section class="hurtig" id="hurtig" hidden>
-          <form class="tilfoej" id="tilfoej-kun" autocomplete="off">
-            <input id="ny-kun" type="text" enterkeyhint="done" placeholder="Tilføj til indkøbslisten …" aria-label="Tilføj til indkøbslisten" autocapitalize="sentences" />
-            <button type="submit" aria-label="Tilføj">+</button>
-          </form>
-          <div class="forslag" id="af-kun"></div>
-          <div class="hurtig-fod"><span class="kvit" id="kvit" aria-live="polite"></span><div class="forslag" id="forslag-kun"></div></div>
+        <section class="kompakt" id="kompakt" hidden>
+          <div class="rk" id="rk" role="link" tabindex="0" aria-label="Åbn Indkøb & Madplan">
+            <span class="ik" id="ik"><ha-icon icon="mdi:silverware-fork-knife"></ha-icon></span>
+            <span class="tk">
+              <span class="over" id="over"></span>
+              <span class="titel" id="titel"></span>
+              <span class="ekstra" id="ekstra"></span>
+            </span>
+            <button class="plus" id="plus" data-act="plus" aria-label="Tilføj til indkøbslisten" aria-expanded="false">
+              <ha-icon icon="mdi:plus"></ha-icon></button>
+          </div>
+          <div class="hurtig" id="hurtig" hidden>
+            <form class="felt" id="tilfoej-kun" autocomplete="off">
+              <input id="ny-kun" type="text" enterkeyhint="done" placeholder="Tilføj til indkøbslisten" aria-label="Tilføj til indkøbslisten" autocapitalize="sentences" />
+              <button type="submit" aria-label="Tilføj"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+            </form>
+            <div class="chips" id="af-kun"></div>
+            <span class="kvit" id="kvit" aria-live="polite"></span>
+          </div>
         </section>
+        <section class="aften" id="aften"></section>
         <nav class="faner" id="faner" role="tablist">
           <button role="tab" data-tab="liste">Indkøbsliste</button>
           <button role="tab" data-tab="statistik">Statistik</button>
@@ -103,11 +116,15 @@ class IndkobMadplanCard extends HTMLElement {
       inp.addEventListener("input", () => this._renderAutofill());
     }
     r.addEventListener("click", (e) => this._click(e));
-    r.getElementById("aften").addEventListener("keydown", (e) => {
-      if (this._config.kun_i_dag && (e.key === "Enter" || e.key === " ")) {
+    r.getElementById("rk").addEventListener("keydown", (e) => {
+      if (e.target.closest("[data-act]")) return;
+      if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         this._openPanel();
       }
+    });
+    r.getElementById("ny-kun").addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this._toggleAdd(false);
     });
     this._renderAll();
   }
@@ -117,36 +134,28 @@ class IndkobMadplanCard extends HTMLElement {
     const r = this.shadowRoot;
     const c = this._config;
     const s = this._state;
+    const kun = !!c.kun_i_dag;
+    this.toggleAttribute("kun", kun);
     if (this._store?.error && !s) {
+      r.getElementById("kompakt").hidden = true;
+      r.getElementById("aften").hidden = false;
       r.getElementById("aften").innerHTML = `<p class="fejl">${C.esc(this._store.error)}</p>`;
       return;
     }
-    const kun = !!c.kun_i_dag;
-    this.toggleAttribute("kun", kun);
+    r.getElementById("kompakt").hidden = !kun;
     if (kun) {
-      const a = r.getElementById("aften");
-      a.hidden = false;
-      a.setAttribute("role", "link");
-      a.setAttribute("tabindex", "0");
-      a.setAttribute("aria-label", "Åbn Indkøb & Madplan");
+      r.getElementById("aften").hidden = true;
       r.getElementById("faner").hidden = true;
       r.getElementById("liste").hidden = true;
       r.getElementById("stats").hidden = true;
-      r.getElementById("hurtig").hidden = !c.hurtig_tilfoej;
-      if (s) {
-        a.innerHTML = C.aftenHTML(s.madplan, { onlyToday: true, showTomorrow: !!c.vis_i_morgen });
-        if (c.hurtig_tilfoej) {
-          const open = s.indkob.lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text);
-          r.getElementById("forslag-kun").innerHTML = c.forslag ? C.forslagHTML(s.stats, open).replace(/^<span class="flabel">[^<]*<\/span>/, "") : "";
-          this._renderAutofill();
-        }
-      }
+      r.getElementById("plus").hidden = !c.hurtig_tilfoej;
+      if (!c.hurtig_tilfoej) this._addOpen = false;
+      r.getElementById("hurtig").hidden = !this._addOpen;
+      this._renderKompakt();
+      if (this._addOpen) this._renderAutofill();
       return;
     }
-    r.getElementById("hurtig").hidden = true;
     r.getElementById("faner").hidden = false;
-    r.getElementById("aften").removeAttribute("role");
-    r.getElementById("aften").removeAttribute("tabindex");
     if (!c.vis_liste) this._tab = "statistik";
     if (!c.vis_statistik) this._tab = "liste";
     r.getElementById("aften").hidden = !c.vis_madplan;
@@ -175,10 +184,67 @@ class IndkobMadplanCard extends HTMLElement {
     const kun = this._config.kun_i_dag;
     const inp = r.getElementById(kun ? "ny-kun" : "ny");
     const box = r.getElementById(kun ? "af-kun" : "forslag");
-    if (kun) box.innerHTML = C.autofillHTML(s.indkob.kendte, inp.value, s.indkob.lines, 4);
-    else {
-      const open = s.indkob.lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text);
-      box.innerHTML = C.autofillHTML(s.indkob.kendte, inp.value, s.indkob.lines, 4) || C.forslagHTML(s.stats, open);
+    const open = s.indkob.lines.filter((l) => l.type === "item" && !l.checked).map((l) => l.text);
+    if (kun) {
+      box.innerHTML = C.autofillHTML(s.indkob.kendte, inp.value, s.indkob.lines, 4)
+        || (this._config.forslag ? C.forslagHTML(s.stats, open).replace(/^<span class="flabel">[^<]*<\/span>/, "") : "");
+      return;
+    }
+    box.innerHTML = C.autofillHTML(s.indkob.kendte, inp.value, s.indkob.lines, 4) || C.forslagHTML(s.stats, open);
+  }
+
+  /* Kompakt visning: én række med dagens ret (+ evt. optøning / i morgen). */
+  _renderKompakt() {
+    const r = this.shadowRoot;
+    const mp = this._state?.madplan;
+    const over = r.getElementById("over");
+    const titel = r.getElementById("titel");
+    const ekstra = r.getElementById("ekstra");
+    const rk = r.getElementById("rk");
+    if (!mp) {
+      over.textContent = "I aften";
+      titel.textContent = "Henter madplan …";
+      ekstra.innerHTML = "";
+      rk.classList.add("tom");
+      return;
+    }
+    const dage = mp.dage || [];
+    const idag = dage.find((d) => d.offset === 0);
+    const imorgen = dage.find((d) => d.offset === 1);
+    const ret = idag?.ret || "";
+    const noter = [...(idag?.noter || []), idag?.stor_portion ? "stor portion" : ""].filter(Boolean);
+    over.innerHTML = `I aften${noter.length ? `<span class="not"> · ${C.esc(noter.join(" · "))}</span>` : ""}`;
+    titel.textContent = ret || "Intet på madplanen";
+    titel.title = ret;
+    rk.classList.toggle("tom", !ret);
+    const linjer = [];
+    const frostDag = mp.frost_dag === "i morgen" ? imorgen : idag;
+    if (frostDag?.kraever_optoening) {
+      const koed = (frostDag.koed || [])[0] || "kød";
+      linjer.push(`<span class="frost-l"><ha-icon icon="mdi:snowflake"></ha-icon>Tag ${C.esc(koed)}${mp.frost_dag === "i morgen" ? " op til i morgen" : " op af fryseren"}</span>`);
+    }
+    if (this._config.vis_i_morgen && imorgen?.ret)
+      linjer.push(`<span class="imorgen-l">I morgen: <b>${C.esc(imorgen.ret)}</b></span>`);
+    ekstra.innerHTML = linjer.join("");
+    rk.classList.toggle("koldt", !!frostDag?.kraever_optoening);
+  }
+
+  _toggleAdd(open = !this._addOpen) {
+    const r = this.shadowRoot;
+    this._addOpen = open;
+    r.getElementById("hurtig").hidden = !open;
+    const plus = r.getElementById("plus");
+    plus.setAttribute("aria-expanded", String(open));
+    plus.setAttribute("aria-label", open ? "Luk" : "Tilføj til indkøbslisten");
+    plus.classList.toggle("aaben", open);
+    const inp = r.getElementById("ny-kun");
+    if (open) {
+      this._renderAutofill();
+      inp.focus({ preventScroll: true });
+    } else {
+      inp.value = "";
+      inp.blur();
+      r.getElementById("kvit").classList.remove("vis");
     }
   }
 
@@ -209,9 +275,15 @@ class IndkobMadplanCard extends HTMLElement {
   }
 
   _click(e) {
-    if (this._config.kun_i_dag && e.target.closest("#aften")) {
-      this._openPanel();
-      return;
+    if (this._config.kun_i_dag) {
+      if (e.target.closest("[data-act='plus']")) {
+        this._toggleAdd();
+        return;
+      }
+      if (e.target.closest("#rk")) {
+        this._openPanel();
+        return;
+      }
     }
     const tab = e.target.closest("[data-tab]");
     if (tab) {
@@ -259,17 +331,50 @@ const CARD_CSS = `
   #cl[data-empty]::before { content: "Alt er købt. Tilføj en vare ovenfor."; color: var(--im-dim); padding: 12px 0; }
   .kurv { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-top: 6px; }
   .kurv:empty { display: none; }
-  .hurtig { padding: 0 16px 12px; }
-  .hurtig .tilfoej { margin: 2px 0 0; }
-  .hurtig-fod { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; min-height: 0; }
-  .kvit { font-size: 14px; color: var(--im-acc); font-weight: 600; opacity: 0; transition: opacity .25s; min-height: 0; }
-  .kvit.vis { opacity: 1; min-height: 1.3em; }
-  .kvit:not(.vis):empty { display: none; }
-  #af-kun:not(:empty) { margin-top: 8px; }
-  :host([kun]) .aften { border-bottom: 0; padding: 16px 18px; cursor: pointer; }
-  :host([kun]) .aften + .hurtig:not([hidden]) { border-top: 1px solid var(--im-line); padding-top: 12px; }
-  :host([kun]) .aften .ret { font-size: clamp(1.5rem, 5vw, 2.1rem); margin-bottom: 0; }
-  :host([kun]) .aften .frost { margin-top: 10px; }
+
+  /* kompakt (kun_i_dag): én række i bubble-stil */
+  :host([kun]) ha-card { overflow: visible; }
+  .kompakt { padding: 6px 8px 6px 6px; }
+  .rk { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 2px 2px 2px 2px; border-radius: 16px;
+        cursor: pointer; -webkit-tap-highlight-color: transparent; outline-offset: 2px; }
+  .rk:active { background: color-mix(in srgb, var(--im-text) 6%, transparent); }
+  .ik { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+        background: color-mix(in srgb, var(--im-acc-strong) 22%, transparent); color: var(--im-acc);
+        --mdc-icon-size: 22px; transition: background .2s, color .2s; }
+  .rk.tom .ik { background: color-mix(in srgb, var(--im-text) 8%, transparent); color: var(--im-dim); }
+  .rk.koldt .ik { background: var(--im-frost-bg); color: var(--im-frost); }
+  .tk { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .over { font-size: 12.5px; line-height: 1.25; color: var(--im-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .titel { font-size: 16px; line-height: 1.25; font-weight: 600; letter-spacing: -.005em; color: var(--im-text);
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rk.tom .titel { font-weight: 500; color: var(--im-dim); }
+  .ekstra { display: flex; flex-direction: column; gap: 1px; }
+  .ekstra:empty { display: none; }
+  .frost-l, .imorgen-l { font-size: 12.5px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .frost-l { color: var(--im-frost); font-weight: 600; display: flex; align-items: center; gap: 4px; --mdc-icon-size: 14px; }
+  .frost-l ha-icon { flex: none; }
+  .imorgen-l { color: var(--im-dim); }
+  .imorgen-l b { color: var(--im-text); font-weight: 500; }
+  .plus { flex: none; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+          background: color-mix(in srgb, var(--im-text) 8%, transparent); color: var(--im-text); --mdc-icon-size: 22px; }
+  .plus ha-icon { transition: transform .2s ease; }
+  .plus.aaben { background: color-mix(in srgb, var(--im-acc-strong) 22%, transparent); color: var(--im-acc); }
+  .plus.aaben ha-icon { transform: rotate(45deg); }
+  .hurtig { padding: 8px 2px 2px; display: flex; flex-direction: column; gap: 8px; }
+  .felt { position: relative; display: flex; }
+  .felt input { flex: 1; min-width: 0; font: inherit; font-size: 16px; height: 42px; box-sizing: border-box; padding: 0 50px 0 16px;
+                border-radius: 21px; border: 0; color: var(--im-text); background: color-mix(in srgb, var(--im-text) 8%, transparent); }
+  .felt input::placeholder { color: var(--im-dim); }
+  .felt input:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--im-acc); }
+  .felt button { position: absolute; right: 4px; top: 4px; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+                 background: var(--im-acc-strong); color: #fff; --mdc-icon-size: 20px; }
+  .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; padding: 1px 0; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chips:empty { display: none; }
+  .chips .chip { flex: none; white-space: nowrap; }
+  .kvit { font-size: 13px; color: var(--im-acc); font-weight: 600; padding: 0 6px; }
+  .kvit:not(.vis) { display: none; }
+  @media (prefers-reduced-motion: reduce) { .plus ha-icon, .ik { transition: none; } }
 `;
 
 if (!customElements.get("indkob-madplan-card")) {
