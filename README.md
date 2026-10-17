@@ -11,7 +11,7 @@ Familiens indkøbsliste og madplan som to noter direkte i Home Assistant – i s
 - **Ingen dubletter** – tilføjes en vare, der allerede står på listen (fra feltet, kortet, Assist eller en automation), fjernes fluebenet i stedet. Feltet foreslår kendte varer, mens man skriver.
 - **Ugeplanlægger** (✨ Planlæg) – foreslår næste uge ud fra jeres egne uger. Hver ret får sin egen rytme (hvor mange aftener der plejer at gå imellem), nylige uger vægter mest, ugedagsvaner tæller (burger om fredagen), og travle aftener – nattevagt, fodbold, én voksen, aftaler i kalenderen – får nemme retter eller rester fra en dobbelt portion dagen før. Variation i kød og tilbehør, lidt tilfældighed, og valgfrit 1–2 nye retter, der ligner noget I allerede kan lide. Lås dagene I vil beholde, tryk "Andet bud" eller vælg selv, og "Gem i madplanen" skriver ugen øverst i jeres format. Bagefter kan ugens varer sættes på indkøbslisten. Retter I er færdige med, skjules med "Foreslå ikke igen". Kalenderen vælges under Indstillinger.
 - **Inspiration i madplanen** – retter fra hele historikken (oftest, længe siden, sjældent, søgning). Tryk sætter retten ind på den dag, markøren står på. "Ny uge" fortsætter dagen efter sidste planlagte dag.
-- **Dashboard-kort** `custom:indkob-madplan-card` – aftensmad i dag/i morgen, optøningspåmindelse, indkøbsliste til afkrydsning, forslag og statistik. Med `kun_i_dag: true` vises kun dagens ret plus et felt til at tilføje varer til indkøbslisten.
+- **Dashboard-kort** `custom:indkob-madplan-card` – aftensmad i dag/i morgen, optøningspåmindelse, indkøbsliste til afkrydsning, forslag og statistik. Med `kun_i_dag: true` bliver kortet til én kompakt række: dagens ret (med noter og ❄-optøning) og en ＋-knap, der folder et felt ud til at tilføje varer til indkøbslisten.
 - **Statistik** – hvert flueben logges som et køb: top-varer, interval, køb pr. uge, indkøbsture og forslag til varer I plejer at købe.
 - **Handlet ind** – når mindst 50 % af varerne er krydset af, regnes det som en indkøbstur. 3 timer efter sidste flueben nulstilles listen automatisk til basislisten, og turen gemmes i statistikken (tærskel og timer ændres under Noter → Indstillinger i panelet).
 - **Indkøbshistorik** – alle indkøbsture med dato og varer. Skriv butik og pris pr. tur (flere butikker pr. tur), eller tilføj et indkøb uden listen. Viser forbrug pr. måned og pr. butik.
@@ -49,7 +49,7 @@ type: custom:indkob-madplan-card
 # vis_statistik: true
 # skjul_koebte: true
 # kun_i_dag: false   # true = vis kun dagens ret (tryk åbner noterne)
-# hurtig_tilfoej: true   # med kun_i_dag: felt "Tilføj til indkøbslisten" under retten
-# forslag: true          # med kun_i_dag: knapper med varer I plejer at købe
+# hurtig_tilfoej: true   # med kun_i_dag: ＋-knap der folder feltet "Tilføj til indkøbslisten" ud
+# forslag: true          # med kun_i_dag: knapper med varer I plejer at købe (i det udfoldede felt)
 # vis_i_morgen: false    # med kun_i_dag: også morgendagens ret
 ```
