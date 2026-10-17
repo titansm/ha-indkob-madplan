@@ -60,7 +60,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     for cmd in (
         ws_subscribe, ws_state, ws_add, ws_update, ws_delete, ws_move,
         ws_clear_checked, ws_uncheck_all, ws_madplan_set, ws_madplan_retter, ws_settings_set, ws_stats_clear,
-        ws_trip_update, ws_trip_add, ws_trip_delete,
+        ws_trip_update, ws_trip_add, ws_trip_delete, ws_trip__spring_pris,
         ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej, ws_indkob_kategori,
         ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd, ws_indkob__fast,
     ):
@@ -245,9 +245,15 @@ def ws_indkob__clear_checked(m: IndkobMadplanManager, msg: dict, user: str | Non
     return {"fjernet": m.finish_trip(user, delete=True)}
 
 
-@_ws({})
-def ws_indkob__uncheck_all(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
-    m.finish_trip(user)
+@_ws({
+    vol.Optional("butik"): vol.Any(None, vol.All(str, vol.Length(max=60))),
+    vol.Optional("beloeb"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=100000))),
+    vol.Optional("fjern"): [str],
+})
+def ws_indkob__uncheck_all(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    """Færdig med at handle: (butik + beløb) → nulstil listen til basislisten."""
+    m.finish_trip(user, butik=msg.get("butik"), beloeb=msg.get("beloeb"), fjern=msg.get("fjern"))
+    return {"trip_id": m.last_finished_trip}
 
 
 @_ws({vol.Required("text"): vol.All(str, vol.Length(max=200000)), vol.Optional("base_version"): vol.Any(int, None)})
@@ -356,6 +362,11 @@ def ws_trip__update(m: IndkobMadplanManager, msg: dict, user: str | None) -> dic
 @_ws({vol.Required("dato"): cv.date, vol.Optional("betalinger", default=list): PAYMENTS})
 def ws_trip__add(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.add_manual_trip(msg["dato"], msg["betalinger"], user)
+
+
+@_ws({vol.Required("trip_id"): str})
+def ws_trip__spring_pris(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
+    m.skip_price(msg["trip_id"], user)
 
 
 @_ws({vol.Required("trip_id"): str})

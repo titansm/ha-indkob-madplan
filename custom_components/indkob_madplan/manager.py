@@ -62,6 +62,7 @@ class IndkobMadplanManager:
         self.indkob = ShoppingNote()
         # Basislisten: de faste varer, som indkøbslisten nulstilles til efter hvert indkøb
         self.basis = ShoppingNote()
+        self.last_finished_trip: str | None = None  # id på turen, "Færdig med at handle" sidst gemte
         self.madplan_note = TextNote()
         self.history = History()
         self.madplan: dict[date, Dag] = {}
@@ -401,12 +402,32 @@ class IndkobMadplanManager:
             self.finish_trip("Automatisk", auto=True)
 
     @callback
-    def finish_trip(self, user: str | None = None, *, auto: bool = False, delete: bool = False) -> int:
+    def finish_trip(self, user: str | None = None, *, auto: bool = False, delete: bool = False,
+                    butik: str | None = None, beloeb: float | None = None, fjern: list[str] | None = None) -> int:
         """Afslut indkøbet: log turen og fjern fluebenene (eller de afkrydsede varer).
 
         Købene er allerede registreret ved afkrydsning – her sættes kun en ny
         grundlinje, så nulstillingen hverken fortryder køb eller tæller som tilføjelser.
+
+        "Færdig med at handle" kan samtidig gemme butik + beløb for varerne i kurven
+        (`butik`/`beloeb`) og fjerne ukøbte engangsvarer, der ikke skal med næste gang (`fjern`).
         """
+        self.last_finished_trip = None
+        butik = (butik or "").strip()
+        if butik:
+            bought = self.bought()
+            if any(ln["checked"] and ln["id"] not in bought and ln["text"].strip() for ln in self.indkob.items()):
+                self.finish_store(butik, beloeb, user)
+        elif beloeb:
+            raise ValueError("Skriv hvilken butik I har handlet i")
+        if fjern:
+            ids = set(fjern)
+            ukoebt = [ln for ln in self.indkob.items()
+                      if ln["id"] in ids and not ln["checked"] and not self.is_fast(ln["text"])]
+            if ukoebt:
+                self.indkob.delete([ln["id"] for ln in ukoebt])
+                self._log(user, "indkob", f"fjernede {len(ukoebt)} engangsvarer, der ikke blev købt: "
+                          + _names([ln["text"] for ln in ukoebt], 6))
         checked = [ln for ln in self.indkob.items() if ln["checked"]]
         trip = self._hist_trip()
         if checked or trip:
@@ -418,6 +439,7 @@ class IndkobMadplanManager:
                 self.history.trips.sort(key=lambda x: x["t"])
             else:
                 trip = self.history.add_trip(when, [ln["text"] for ln in checked], auto)
+            self.last_finished_trip = trip["id"]
             self.hass.bus.async_fire(
                 EVENT_HANDLET_IND,
                 {"tidspunkt": trip["t"], "antal": len(trip["varer"]), "varer": trip["varer"], "automatisk": auto},
@@ -985,6 +1007,40 @@ class IndkobMadplanManager:
         self._log(user, "historik", f"slettede indkøbet {_dato(tr['t'])}")
         self._trips_changed()
 
+    @callback
+    def skip_price(self, trip_id: str, user: str | None = None) -> None:
+        """Indkøbet får ingen pris – spørg ikke efter beløbet igen."""
+        tr = self.history.get_trip(trip_id)
+        tr["pris_sprunget"] = True
+        self._log(user, "historik", f"sprang prisen over for indkøbet {_dato(tr['t'])}", key=f"trip:{trip_id}", window=600)
+        self._trips_changed()
+
+    MANGLER_PRIS_DAGE = 7
+
+    def missing_price(self) -> dict | None:
+        """Seneste afsluttede indkøb uden beløb (til kortet "Hvad blev indkøbet?").
+
+        Kun det nyeste indkøb fra listen inden for en uge – ikke mens der handles,
+        ikke manuelt tilføjede, og ikke når prisen er sprunget over.
+        """
+        if self.trip is not None:
+            return None
+        ture = [t for t in self.history.trips if not t.get("manuel") and t.get("varer")]
+        if not ture:
+            return None
+        tr = ture[-1]  # turene holdes sorteret efter tid (stabilt, så det nyeste står sidst)
+        bet = tr.get("betalinger", [])
+        if tr.get("pris_sprunget") or (bet and all(b.get("beloeb") for b in bet)):
+            return None  # sprunget over, eller alle butikker har et beløb
+        t = dt_util.parse_datetime(tr["t"])
+        if t is None or dt_util.now() - t > timedelta(days=self.MANGLER_PRIS_DAGE):
+            return None
+        return {
+            "id": tr["id"], "t": tr["t"], "antal": len(tr["varer"]), "auto": tr.get("auto", False),
+            "butikker": [b.get("butik", "") for b in bet],
+            "mangler": [b.get("butik", "") for b in bet if not b.get("beloeb")],
+        }
+
     def _trips_changed(self) -> None:
         self.stats = self.history.compute(dt_util.now())
         self._save()
@@ -1035,7 +1091,7 @@ class IndkobMadplanManager:
             },
             "stats": {k: v for k, v in self.stats.items() if k != "varer"},
             "indstillinger": self.settings(),
-            "historik": self.history.trip_overview(dt_util.now()),
+            "historik": {**self.history.trip_overview(dt_util.now()), "mangler_pris": self.missing_price()},
             "log": [{k: v for k, v in e.items() if k not in ("k", "fra")} for e in reversed(self.log[-150:])],
         }
 
