@@ -442,7 +442,9 @@ class IndkobMadplanManager:
             self.last_finished_trip = trip["id"]
             self.hass.bus.async_fire(
                 EVENT_HANDLET_IND,
-                {"tidspunkt": trip["t"], "antal": len(trip["varer"]), "varer": trip["varer"], "automatisk": auto},
+                {"tidspunkt": trip["t"], "antal": len(trip["varer"]), "varer": trip["varer"], "automatisk": auto,
+                 "trip_id": trip["id"], "beloeb": round(sum(b.get("beloeb", 0) for b in trip.get("betalinger", [])), 2),
+                 "mangler_pris": _mangler_pris(trip)},
             )
         if delete:
             n = self.indkob.clear_checked()
@@ -1030,7 +1032,7 @@ class IndkobMadplanManager:
             return None
         tr = ture[-1]  # turene holdes sorteret efter tid (stabilt, så det nyeste står sidst)
         bet = tr.get("betalinger", [])
-        if tr.get("pris_sprunget") or (bet and all(b.get("beloeb") for b in bet)):
+        if not _mangler_pris(tr):
             return None  # sprunget over, eller alle butikker har et beløb
         t = dt_util.parse_datetime(tr["t"])
         if t is None or dt_util.now() - t > timedelta(days=self.MANGLER_PRIS_DAGE):
@@ -1121,6 +1123,12 @@ def _dato(iso: str) -> str:
 def _kr(v: float) -> str:
     s = f"{v:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".")
     return (s[:-3] if s.endswith(",00") else s) + " kr"
+
+
+def _mangler_pris(tr: dict) -> bool:
+    """Mangler indkøbet et beløb? (ingen betalinger, eller en butik uden beløb – og ikke sprunget over)"""
+    bet = tr.get("betalinger", [])
+    return not tr.get("pris_sprunget") and (not bet or not all(b.get("beloeb") for b in bet))
 
 
 def _clean_payments(betalinger: list[dict]) -> list[dict]:

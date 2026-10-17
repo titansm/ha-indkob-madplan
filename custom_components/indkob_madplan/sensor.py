@@ -147,4 +147,7 @@ class SidsteIndkobSensor(IndkobEntity, SensorEntity):
             "dage_mellem_ture": s.get("dage_mellem_ture"),
             "handler_nu": tur is not None,
             "flueben_fjernes": due.isoformat() if (due := self.manager.trip_due()) else None,
+            # Seneste indkøb uden beløb (kortet "Hvad blev indkøbet?") – til notifikationer
+            "mangler_pris": (mp := self.manager.missing_price()) is not None,
+            "mangler_pris_tur": mp["id"] if mp else None,
         }
