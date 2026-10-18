@@ -6,7 +6,7 @@
  *           forslag (true) – med kun_i_dag: "plejer I at købe"-knapper i det udfoldede felt
  *           vis_i_morgen (false) – med kun_i_dag: også morgendagens ret
  */
-import * as C from "./im-common.js?v=0.10.1";
+import * as C from "./im-common.js?v=0.11.0";
 
 // Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
 C.resumeIfShopping();

@@ -2,13 +2,15 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.10.1";
-import "./im-planner.js?v=0.10.1";
+} from "./im-common.js?v=0.11.0";
+import "./im-planner.js?v=0.11.0";
+import "./im-retter.js?v=0.11.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
   { id: "basis", title: "Basisliste" },
   { id: "madplan", title: "Madplan" },
+  { id: "retter", title: "Retter" },
   { id: "historik", title: "Indkøbshistorik" },
   { id: "stats", title: "Statistik" },
   { id: "log", title: "Redigeringslog" },
@@ -191,6 +193,20 @@ class IndkobMadplanPanel extends HTMLElement {
               <textarea id="mp" spellcheck="true" aria-label="Madplan"
                 placeholder="Uge 42&#10;Onsdag: kylling i karry&#10;Torsdag: tit nat - pita"></textarea>
             </section>
+            <section id="v-retter" class="pane">
+              <h2 class="titel">Retter</h2>
+              <p class="meta">Alle jeres retter – med indkøbsliste, så de kan lægges på listen med ét tryk.</p>
+              <im-retter id="retter-el"></im-retter>
+              <details class="hjaelp">
+                <summary>ⓘ Sådan virker Retter</summary>
+                <div>
+                  <p><b>Alle retter samlet:</b> opskrifterne fra ReciMe og jeres egne retter fra madplanen. 🛒 betyder, at retten har en indkøbsliste – så kan den lægges på indkøbslisten med ét tryk (×2 = dobbelt portion til rester).</p>
+                  <p><b>Mangler varer:</b> egne retter uden indkøbsliste, dem I spiser oftest øverst. Tryk på en ret → <i>Skriv varerne</i>. Listen huskes, så retten fremover fylder indkøbslisten selv. Er retten en af jeres opskrifter, så tryk <i>Brug</i> – så bruger den opskriftens varer.</p>
+                  <p><b>Opskrifternes mængder</b> er omregnet til gram, dl og stk og skaleret til jeres portion (Noter → <button class="link" data-note="indstillinger">Indstillinger</button> → Omregning). Varer, I altid har (salt, olie, krydderier …), kommer ikke på listen. Fremgangsmåden står i ReciMe – tryk <i>Åbn opskriften i ReciMe</i>.</p>
+                  <p><b>Rediger</b> retter jeres egen udgave af listen; <i>Gendan</i> går tilbage til opskriftens.</p>
+                </div>
+              </details>
+            </section>
             <section id="v-historik" class="pane hist">
               <h2 class="titel">Indkøbshistorik</h2>
               <p class="meta">Hvornår I har handlet – tryk på et indkøb for at skrive butik og pris.</p>
@@ -253,6 +269,9 @@ class IndkobMadplanPanel extends HTMLElement {
                   <input type="text" id="s-ignorer" data-set="ignorer_ord" placeholder="fx bacon" autocomplete="off" /></label>
               </div>
               <details class="fod std"><summary>Standard-ord</summary><p id="s-std"></p></details>
+
+              <h3 class="gruppe">Omregning af opskrifter</h3>
+              <im-omregning id="omregning-el"></im-omregning>
 
               <h3 class="gruppe">Statistik</h3>
               <div class="kort">
@@ -372,6 +391,13 @@ class IndkobMadplanPanel extends HTMLElement {
       this._insp.q = e.target.value;
       this._renderInsp();
     });
+    r.getElementById("retter-el").setup(this._storeProxy());
+    r.getElementById("omregning-el").setup(this._storeProxy());
+    r.addEventListener("im-toast", (e) => {
+      const d = e.detail || {};
+      this._toast(d.text, { actions: d.actions || [], ms: d.ms || (d.actions?.length ? 6000 : 3500) });
+    });
+    r.addEventListener("im-status", (e) => this._setStatus(e.detail));
     r.getElementById("v-indstillinger").addEventListener("change", (e) => this._settingChanged(e));
     r.getElementById("v-indstillinger").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && e.target.matches("input[type=text]")) e.target.blur();
@@ -406,6 +432,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderSettings();
     this._renderHistorik();
     this._renderLog();
+    this._feedSub();
     if (!this._scrollRestored) {
       this._scrollRestored = true;
       const y = lsGet("scroll_" + (this._open || ""), 0);
@@ -429,7 +456,23 @@ class IndkobMadplanPanel extends HTMLElement {
     for (const n of NOTES) r.getElementById("v-" + n.id).hidden = n.id !== open;
     this._renderTools(open);
     this._renderNoteList();
+    this._feedSub();
     if (open === "madplan") requestAnimationFrame(() => this._autogrow());
+  }
+
+  /* Retter og Omregning henter først deres data, når noten er åben */
+  _feedSub() {
+    const s = this._state;
+    if (!s) return;
+    const narrow = this.shadowRoot.querySelector(".app")?.classList.contains("smal");
+    const open = this._open || (narrow ? null : "indkob");
+    if (open === "retter") this.shadowRoot.getElementById("retter-el").state = s;
+    if (open === "indstillinger") this.shadowRoot.getElementById("omregning-el").state = s;
+  }
+
+  /* Store-adgang til under-elementerne (oprettes før abonnementet findes) */
+  _storeProxy() {
+    return { send: (type, data) => this._store.send(type, data), remove: (ids) => this._store.remove(ids) };
   }
 
   /* ------------------------------------------------------------ notelisten */
@@ -462,6 +505,13 @@ class IndkobMadplanPanel extends HTMLElement {
       if (id === "log") {
         const l = s.log?.[0];
         return l ? `${relTime(l.t)} · ${esc(l.bruger)} ${esc(l.tekst)}` : "Ingen ændringer endnu";
+      }
+      if (id === "retter") {
+        const rt = s.retter;
+        if (!rt || rt.alle === undefined) return "";
+        return rt.opskrifter || rt.med_varer
+          ? `${rt.med_varer} af ${rt.alle} retter har indkøbsliste`
+          : `${rt.alle} retter · ingen opskrifter endnu`;
       }
       if (id === "indstillinger") {
         const i = s.indstillinger;
@@ -497,6 +547,8 @@ class IndkobMadplanPanel extends HTMLElement {
     } else if (open === "madplan") {
       t.innerHTML = `<button class="vk" data-act="planlaeg" title="Forslag til næste uges madplan">Planlæg</button>
         <button class="vk" data-act="ny-uge" title="Indsæt en tom uge øverst">Ny uge</button>`;
+    } else if (open === "retter") {
+      t.innerHTML = `<button class="vk" data-act="ny-ret" title="Ny ret med indkøbsliste">＋ Ny ret</button>`;
     } else t.innerHTML = "";
   }
 
@@ -1120,7 +1172,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const el = this.shadowRoot.getElementById("log-liste");
     let lastDay = "";
     const dag = (iso) => new Date(iso).toLocaleDateString("da-DK", { weekday: "long", day: "numeric", month: "long" });
-    const NOTE = { indkob: "🛒", basis: "📌", madplan: "🍽", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
+    const NOTE = { indkob: "🛒", basis: "📌", madplan: "🍽", retter: "📖", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
     el.innerHTML = log.length
       ? log.map((l) => {
           const d = dag(l.t);
@@ -1389,6 +1441,8 @@ class IndkobMadplanPanel extends HTMLElement {
       this._renderTools("indkob");
     } else if (act === "mere") {
       pop.hidden = !pop.hidden;
+    } else if (act === "ny-ret") {
+      r.getElementById("retter-el").nyRet();
     } else if (act === "fjern-afkrydsede") {
       pop.hidden = true;
       const n = this._state.indkob.lines.filter((l) => l.type === "item" && l.checked).length;
@@ -1621,7 +1675,7 @@ const PANEL_CSS = `
   .toast { position: absolute; left: 50%; bottom: calc(28px + var(--safe-area-inset-bottom, 0px)); transform: translateX(-50%);
            display: flex; align-items: center; gap: 18px; width: max-content; max-width: calc(100% - 32px); box-sizing: border-box;
            padding: 12px 18px; border-radius: 14px;
-           background: #2b2b2e; color: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.3); z-index: 20; font-size: 15px; white-space: nowrap; }
+           background: #2b2b2e; color: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.3); z-index: 50; font-size: 15px; white-space: nowrap; }
   .toast span { overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .toast button { flex: none; }
   .katvalg { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.35); display: flex; align-items: flex-end; justify-content: center; }
