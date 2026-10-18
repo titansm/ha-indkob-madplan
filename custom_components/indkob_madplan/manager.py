@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -28,18 +29,21 @@ from .const import (
     EVENT_BUTIK_AFSLUTTET,
     EVENT_HANDLET_IND,
     FROST_TODAY,
+    FROST_SKIFT_TIME,
     FROST_TOMORROW,
     NOTE_BASIS,
     NOTE_INDKOB,
     NOTE_MADPLAN,
     SIGNAL_UPDATE,
     STORAGE_KEY,
+    STORAGE_KEY_OPSKRIFTER,
     STORAGE_VERSION,
     VERSION,
 )
-from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, parse_madplan, retter
+from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, dish_key, parse_madplan, retter
 from .notes import TYPE_ITEM, ShoppingNote, TextNote
 from . import kategorier as kat
+from . import opskrifter as op
 from . import planner as pl
 from .stats import History, clean_names, normalize
 
@@ -78,6 +82,12 @@ class IndkobMadplanManager:
         self.log: list[dict] = []
         # Ugeplanlæggeren: retter I ikke vil have foreslået igen
         self.planner_data: dict[str, Any] = {"skjulte": []}
+        # Opskriftsbanken: importerede opskrifter, omregning og jeres egne indkøbslister til retter
+        self.bank_store: Store = Store(hass, 1, STORAGE_KEY_OPSKRIFTER)
+        self.bank = op.Opskriftsbank()
+        self._egne_cache: tuple | None = None
+        self._katalog_cache: tuple | None = None
+        self._bank_dirty = False
 
     # ------------------------------------------------------------ options
     @property
@@ -86,7 +96,14 @@ class IndkobMadplanManager:
 
     @property
     def frost_tomorrow(self) -> bool:
-        return self.opts.get(CONF_FROST_DAY) == FROST_TOMORROW
+        """Gælder optøningen morgendagens ret?
+
+        Altid, når indstillingen er "retten i morgen". Ellers fra kl. 18 (FROST_SKIFT_TIME),
+        hvor dagens aftensmad er spist – så viser kort/sensor, hvad der skal op til i morgen.
+        """
+        if self.opts.get(CONF_FROST_DAY) == FROST_TOMORROW:
+            return True
+        return dt_util.now().hour >= FROST_SKIFT_TIME
 
     @property
     def trip_threshold(self) -> float:
@@ -158,6 +175,11 @@ class IndkobMadplanManager:
         self.trip = data.get("trip")
         self.log = data.get("log", [])
         self.planner_data = {"skjulte": [], **(data.get("planner") or {})}
+        try:
+            self.bank = op.Opskriftsbank(await self.bank_store.async_load())
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Kunne ikke læse opskriftsbanken – starter tom")
+            self.bank = op.Opskriftsbank()
         if self.indkob.sanitize():
             _LOGGER.info("Indkøbslisten ryddet op (tomme linjer med flueben)")
         if data.get(NOTE_BASIS) is None:
@@ -177,6 +199,9 @@ class IndkobMadplanManager:
             async_track_time_change(self.hass, self._on_midnight, hour=0, minute=0, second=5)
         )
         self._unsubs.append(
+            async_track_time_change(self.hass, self._on_frost_skift, hour=FROST_SKIFT_TIME, minute=0, second=5)
+        )
+        self._unsubs.append(
             async_track_time_interval(self.hass, self._on_tick, timedelta(minutes=5))
         )
         self._parse_madplan()
@@ -189,6 +214,8 @@ class IndkobMadplanManager:
             unsub()
         self._unsubs.clear()
         await self.store.async_save(self._data())
+        if self._bank_dirty:  # kun hvis noget er ændret (en fejlet indlæsning må aldrig overskrive filen)
+            await self.bank_store.async_save(self.bank.as_dict())
 
     def _data(self) -> dict:
         return {
@@ -203,6 +230,15 @@ class IndkobMadplanManager:
 
     def _save(self) -> None:
         self.store.async_delay_save(self._data, 2)
+
+    def _save_bank(self) -> None:
+        self._bank_dirty = True
+        self.bank_store.async_delay_save(self.bank.as_dict, 2)
+
+    @callback
+    def _on_frost_skift(self, _now: datetime) -> None:
+        """Kl. 18: optøningen skifter fra dagens til morgendagens ret."""
+        self._notify()
 
     @callback
     def _on_midnight(self, _now: datetime) -> None:
@@ -770,6 +806,234 @@ class IndkobMadplanManager:
         ]
         return {"version": self.madplan_note.version, "retter": retter(self.madplan, today, DEFAULT_REST_ORD), "dage": alle}
 
+    # ------------------------------------------------------------ retter (opskrifter + jeres egne retter)
+    def _egne_hist(self) -> dict[str, dict]:
+        """Jeres egne retter fra madplanen (kendte navne samlet) – nøgle -> navn, antal, sidst."""
+        today = dt_util.now().date()
+        nøgle = (self.madplan_note.version, today)
+        if self._egne_cache and self._egne_cache[0] == nøgle:
+            return self._egne_cache[1]
+        out: dict[str, dict] = {}
+        try:
+            aftener = pl.laes_historik(self.madplan)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Kunne ikke læse retter fra madplanen")
+            aftener = []
+        for a in aftener:
+            if a.slags != "ret" or a.dato > today:
+                continue
+            key = dish_key(a.navn)
+            if not key:
+                continue
+            it = out.setdefault(key, {"navn": a.navn, "antal": 0, "sidst": None})
+            it["antal"] += 1
+            it["sidst"] = a.dato.isoformat()
+            it["navn"] = a.navn
+        for navn in pl.RETTER:
+            out.setdefault(dish_key(navn), {"navn": navn, "antal": 0, "sidst": None})
+        self._egne_cache = (nøgle, out)
+        return out
+
+    def _egen_navn(self, eid: str) -> str:
+        e = self.bank.egne.get(eid) or {}
+        h = self._egne_hist().get(eid[2:])
+        return e.get("navn") or (h or {}).get("navn") or eid[2:]
+
+    def retter_katalog(self) -> dict:
+        """Alle retter til noten "Retter": opskrifter + jeres egne retter med/uden indkøbsliste."""
+        today = dt_util.now().date()
+        nøgle = (self.bank.version, self.madplan_note.version, today)
+        if self._katalog_cache and self._katalog_cache[0] == nøgle:
+            return self._katalog_cache[1]
+        b = self.bank
+        items: list[dict] = []
+        kogeb: Counter = Counter()
+        for r in b.raa:
+            rid = "r:" + r["id"]
+            varer = b.varer(rid)
+            for kb in r["kogeboger"]:
+                kogeb[kb] += 1
+            items.append({
+                "id": rid, "type": "opskrift", "navn": op.paen_titel(r["titel"]), "kogeboger": r["kogeboger"],
+                "billede": op.billede_url(r["billede"]), "tid": r["tid"]["total"] or None,
+                "antal_varer": len(varer or []), "har_varer": bool(varer), "rettet": "varer" in b.egne.get(rid, {}),
+                "gange": 0, "sidst": None, "soeg": " ".join(v["navn"].lower() for v in varer or []),
+            })
+        hist = self._egne_hist()
+        ids = ["e:" + k for k in hist] + [i for i in b.egne if i.startswith("e:") and i[2:] not in hist]
+        for eid in ids:
+            h = hist.get(eid[2:]) or {}
+            e = b.egne.get(eid) or {}
+            varer = b.varer(eid)
+            link = b.opskrift(e["opskrift"][2:]) if e.get("opskrift") else None
+            items.append({
+                "id": eid, "type": "egen", "navn": e.get("navn") or h.get("navn") or eid[2:], "kogeboger": [],
+                "billede": op.billede_url(link["billede"]) if link else None, "tid": None,
+                "antal_varer": len(varer or []), "har_varer": bool(varer), "rettet": "varer" in e,
+                "opskrift": e.get("opskrift"), "gange": h.get("antal", 0), "sidst": h.get("sidst"),
+                "soeg": " ".join(v["navn"].lower() for v in varer or []),
+            })
+        n_egne = len(ids)
+        res = {
+            "retter": items,
+            "kogeboger": [{"navn": k, "antal": n} for k, n in sorted(kogeb.items(), key=lambda x: (-x[1], x[0]))],
+            "antal": {"alle": len(items), "med_varer": sum(1 for i in items if i["har_varer"]),
+                      "opskrifter": len(b.raa), "egne": n_egne,
+                      "egne_med_varer": sum(1 for i in items if i["type"] == "egen" and i["har_varer"])},
+            "importeret": b.importeret, "kilde": b.kilde,
+            "version": f"{b.version}.{self.madplan_note.version}",
+        }
+        self._katalog_cache = (nøgle, res)
+        return res
+
+    def _vare_ud(self, v: dict) -> dict:
+        return {"navn": v["navn"], "maengde": v.get("mængde"), "enhed": v.get("enhed") or "",
+                "tekst": op.maengde_tekst(v), "liste": op.liste_tekst(v)}
+
+    def ret_detalje(self, ret_id: str) -> dict:
+        b = self.bank
+        if ret_id.startswith("r:"):
+            r = b.opskrift(ret_id[2:])
+            if not r:
+                raise ValueError("Opskriften findes ikke længere")
+            k = b.konverteret()[r["id"]]
+            e = b.egne.get(ret_id) or {}
+            varer = b.varer(ret_id) or []
+            return {
+                "id": ret_id, "type": "opskrift", "navn": op.paen_titel(r["titel"]), "kogeboger": r["kogeboger"],
+                "billede": op.billede_url(r["billede"]), "tid": r["tid"], "portioner": r["portioner"],
+                "kokken": r["kokken"], "trin": r["trin"],
+                "recime": f"https://www.recime.app/dashboard/recipes/{r['id']}", "kilde": op.kilde_url(r["kilde"]),
+                "faktor": k["faktor"], "grundlag": k["grundlag"], "koed_g": k["koed_g"],
+                "varer": [self._vare_ud(v) for v in varer], "har_varer": bool(varer),
+                "rettet": "varer" in e, "standard_varer": [self._vare_ud(v) for v in k["varer"]],
+                "har_vi_altid": k["har_vi_altid"], "ikke_tolket": k["ikke_tolket"],
+                "original": [op.original_tekst(ln) for ln in r["linjer"]],
+                "rettet_t": e.get("t"), "rettet_af": e.get("af"),
+            }
+        if not ret_id.startswith("e:"):
+            raise ValueError("Ukendt ret")
+        h = self._egne_hist().get(ret_id[2:]) or {}
+        e = b.egne.get(ret_id) or {}
+        if not h and not e:
+            raise ValueError("Retten findes ikke længere")
+        navn = e.get("navn") or h.get("navn") or ret_id[2:]
+        varer = b.varer(ret_id) or []
+        link = None
+        if e.get("opskrift") and (lr := b.opskrift(e["opskrift"][2:])):
+            link = {"id": e["opskrift"], "navn": op.paen_titel(lr["titel"]), "billede": op.billede_url(lr["billede"])}
+        forslag = sorted(
+            ((op.ligner(navn, op.paen_titel(r["titel"])), r) for r in b.raa), key=lambda x: -x[0])
+        kanon = pl.kanonisk(navn) or navn
+        return {
+            "id": ret_id, "type": "egen", "navn": navn, "gange": h.get("antal", 0), "sidst": h.get("sidst"),
+            "varer": [self._vare_ud(v) for v in varer], "har_varer": bool(varer), "egne_varer": "varer" in e,
+            "opskrift": link,
+            "forslag_opskrifter": [
+                {"id": "r:" + r["id"], "navn": op.paen_titel(r["titel"]), "billede": op.billede_url(r["billede"])}
+                for s, r in forslag[:4] if s >= 0.5
+            ],
+            "forslag_varer": list(pl.RETTER.get(kanon, {}).get("varer", [])),
+            "rettet_t": e.get("t"), "rettet_af": e.get("af"),
+        }
+
+    @callback
+    def gem_ret(self, ret_id: str | None, user: str | None = None, *, navn: str | None = None,
+                varer: list[dict] | None | bool = False, opskrift: str | None | bool = False) -> dict:
+        """Gem jeres indkøbsliste til en ret (eller koblingen til en opskrift). ret_id None = ny egen ret."""
+        if ret_id is None:
+            navn = (navn or "").strip()
+            if not navn:
+                raise ValueError("Skriv et navn til retten")
+            key = dish_key(navn)
+            if not key:
+                raise ValueError("Ugyldigt navn")
+            ret_id = "e:" + key
+            if ret_id in self.bank.egne or key in self._egne_hist():
+                navn = None  # findes allerede – gem bare varerne på den
+        try:
+            self.bank.gem(ret_id, navn=navn, varer=varer, opskrift=opskrift,
+                          t=dt_util.now().isoformat(timespec="seconds"), af=user)
+        except KeyError as err:
+            raise ValueError("Retten eller opskriften findes ikke længere") from err
+        rnavn = (op.paen_titel(self.bank.opskrift(ret_id[2:])["titel"]) if ret_id.startswith("r:")
+                 else self._egen_navn(ret_id))
+        if varer is None and opskrift is False:
+            tekst = f'gendannede indkøbslisten til "{rnavn}"'
+        elif opskrift not in (False, None):
+            tekst = f'koblede "{rnavn}" til opskriften "{op.paen_titel(self.bank.opskrift(opskrift[2:])["titel"])}"'
+        elif opskrift is None and varer is False:
+            tekst = f'fjernede opskriften fra "{rnavn}"'
+        else:
+            n = len(self.bank.varer(ret_id) or [])
+            tekst = f'gemte indkøbslisten til "{rnavn}" ({n} {"vare" if n == 1 else "varer"})'
+        self._log(user, "retter", tekst, key=f"ret:{ret_id}", window=300)
+        self._save_bank()
+        self._save()
+        self._notify()
+        return self.ret_detalje(ret_id)
+
+    @callback
+    def ret_paa_listen(self, ret_id: str, gange: float = 1, user: str | None = None) -> dict:
+        """Læg rettens varer på indkøbslisten (som engangsvarer med auto-kategori)."""
+        varer = self.bank.varer(ret_id)
+        if not varer:
+            raise ValueError("Retten har ingen indkøbsliste endnu")
+        rnavn = (op.paen_titel(self.bank.opskrift(ret_id[2:])["titel"]) if ret_id.startswith("r:")
+                 else self._egen_navn(ret_id))
+        nye, fandtes = [], []
+        for v in varer:
+            t = op.liste_tekst(v, gange)
+            if ex := self._existing(t):
+                if ex["checked"]:
+                    self.indkob.update(ex["id"], checked=False)
+                fandtes.append(ex["text"])
+                continue
+            nye.append(self.indkob.add(t, line_type=TYPE_ITEM, auto_place=True))
+        self._log(user, "indkob", f'lagde {len(nye)} {"vare" if len(nye) == 1 else "varer"} fra "{rnavn}" på listen'
+                  + (f" ({len(fandtes)} stod der i forvejen)" if fandtes else ""))
+        self.indkob_changed(user)
+        return {"ret": rnavn, "tilfoejet": [ln["text"] for ln in nye], "ids": [ln["id"] for ln in nye],
+                "fandtes": fandtes}
+
+    def omregning(self) -> dict:
+        o = self.bank.omregning
+        k = self.bank.konverteret()
+        grundlag = Counter(
+            "koed" if v["grundlag"].endswith("kød") else "portioner" if v["grundlag"].endswith("portioner") else "uaendret"
+            for v in k.values()
+        )
+        return {
+            "omregning": o, "standard": op.STANDARD, "aendret": sorted(self.bank.omr_aendret),
+            "opsummering": {"opskrifter": len(k), **grundlag,
+                            "ikke_tolket": sum(len(v["ikke_tolket"]) for v in k.values()),
+                            "varer": sum(len(v["varer"]) for v in k.values())},
+        }
+
+    @callback
+    def set_omregning(self, changes: dict | None, user: str | None = None, *, nulstil: bool = False) -> dict:
+        if nulstil:
+            if self.bank.nulstil_omregning():
+                self._log(user, "indstillinger", "gendannede standard-omregningen af opskrifter")
+        else:
+            for label in self.bank.set_omregning(changes or {}):
+                self._log(user, "indstillinger", f'ændrede omregning: "{label}"', key=f"omr:{label}", window=300)
+        self._save_bank()
+        self._save()
+        self._notify()
+        return self.omregning()
+
+    @callback
+    def importer_opskrifter(self, tekst: str, user: str | None = None, *, erstat: bool = True) -> dict:
+        res = self.bank.importer(tekst, erstat=erstat, t=dt_util.now().isoformat(timespec="seconds"))
+        self.bank.konverteret()
+        self._log(user, "retter", f'importerede {res["antal"]} opskrifter ({res["nye"]} nye, {res["opdaterede"]} opdaterede'
+                  + (f', {res["fjernede"]} fjernet' if res["fjernede"] else "") + ")")
+        self._save_bank()
+        self._save()
+        self._notify()
+        return res
+
     # ------------------------------------------------------------ ugeplanlægger
     def _kalendere(self) -> list[dict]:
         return sorted(
@@ -1049,6 +1313,14 @@ class IndkobMadplanManager:
         self._notify()
 
     # ------------------------------------------------------------ views
+    def _retter_resume(self) -> dict:
+        try:
+            k = self.retter_katalog()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Retkataloget fejlede")
+            return {"version": None}
+        return {"version": k["version"], **k["antal"], "importeret": k["importeret"]}
+
     def state(self) -> dict:
         """Alt hvad panel og kort skal bruge."""
         basis_keys = {normalize(b["text"]) for b in self.basis.items()}
@@ -1093,6 +1365,7 @@ class IndkobMadplanManager:
             },
             "stats": {k: v for k, v in self.stats.items() if k != "varer"},
             "indstillinger": self.settings(),
+            "retter": self._retter_resume(),
             "historik": {**self.history.trip_overview(dt_util.now()), "mangler_pris": self.missing_price()},
             "log": [{k: v for k, v in e.items() if k not in ("k", "fra")} for e in reversed(self.log[-150:])],
         }

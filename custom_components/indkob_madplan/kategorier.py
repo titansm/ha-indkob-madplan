@@ -187,8 +187,28 @@ _FROST_MOD = {"frost", "frosne", "frossen", "frossent", "frosset", "frostvarer",
 # Ord der er kolonial-modifikatorer ("tørret timian", "dåse majs")
 _TOR_MOD = {"tørret", "tørrede", "dåse", "dåser", "glas"}
 
+# Flere varer fra opskrifterne (0.11) – kun nye ord, de faste ovenfor vinder
+_ORD_EKSTRA: dict[str, tuple[str, ...]] = {
+    "frugt": ("jalapeño", "jalapeno", "dadler", "figner", "tranebær", "bær", "sortkål", "kinakål", "ræddike",
+              "frisk gurkemeje", "guacamole"),
+    "kod": ("oksebøf", "oksetykkam", "tykkam", "hakket lam", "lam", "pancetta", "guanciale", "dorade", "havbars",
+            "kyllingeoverlår", "grillkylling"),
+    "mejeri": ("gedeost", "burrata", "stracciatella", "comté", "tofu", "silketofu", "røget tofu",
+               "mandeldrik", "kimchi"),
+    "brod": ("surdej",),
+    "frost": ("gyoza",),
+    "torvarer": ("tahin", "tahini", "brun farin", "farin", "ahornsirup", "agavesirup", "kapers", "gochujang",
+                 "gochugaru", "miso", "misopasta", "chiafrø", "msg", "za'atar", "sumak", "gærflager", "farro",
+                 "perlespelt", "perlebyg", "fuldkornsmel", "butterbeans", "gigantebønner", "vaniljeekstrakt",
+                 "tamari", "tørsurdej", "rispapir", "rismel", "croutoner", "proteinpulver", "hørfrø",
+                 "sambal oelek", "sushiris", "mirin", "kecap manis", "orecchiette", "ditalini", "risotto"),
+}
+
 ORD: dict[str, str] = {}
 for _k, _ws in _ORD.items():
+    for _w in _ws:
+        ORD.setdefault(_w, _k)
+for _k, _ws in _ORD_EKSTRA.items():
     for _w in _ws:
         ORD.setdefault(_w, _k)
 _FRASER = sorted((w for w in ORD if " " in w), key=len, reverse=True)

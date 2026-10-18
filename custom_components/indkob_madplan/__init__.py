@@ -63,6 +63,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_trip_update, ws_trip_add, ws_trip_delete, ws_trip__spring_pris,
         ws_madplan_planlaeg, ws_madplan_indsaet, ws_madplan_skjul, ws_indkob_tilfoej, ws_indkob_kategori,
         ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd, ws_indkob__fast,
+        ws_retter__liste, ws_retter__hent, ws_retter__gem, ws_retter__paa_listen,
+        ws_omregning__hent, ws_omregning__saet, ws_opskrifter__importer,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -326,6 +328,59 @@ def ws_indkob__tilfoej(m: IndkobMadplanManager, msg: dict, user: str | None) -> 
 })
 def ws_settings__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.set_settings({k: v for k, v in msg.items() if k not in ("id", "type")}, user)
+
+
+# ---------------------------------------------------------------- retter og opskrifter (0.11)
+RET_ID = vol.All(str, vol.Length(min=3, max=200))
+VARE = {
+    vol.Required("navn"): vol.All(str, vol.Length(max=120)),
+    vol.Optional("maengde"): vol.Any(None, vol.Coerce(float), vol.All(str, vol.Length(max=20))),
+    vol.Optional("enhed"): vol.Any(None, vol.All(str, vol.Length(max=12))),
+}
+
+
+@_ws({})
+def ws_retter__liste(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.retter_katalog()
+
+
+@_ws({vol.Required("ret"): RET_ID})
+def ws_retter__hent(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.ret_detalje(msg["ret"])
+
+
+@_ws({
+    vol.Optional("ret"): vol.Any(None, RET_ID),
+    vol.Optional("navn"): vol.Any(None, vol.All(str, vol.Length(max=120))),
+    vol.Optional("varer"): vol.Any(None, vol.All([VARE], vol.Length(max=80))),
+    vol.Optional("opskrift"): vol.Any(None, RET_ID),
+})
+def ws_retter__gem(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    varer = msg["varer"] if "varer" in msg else False
+    if varer:
+        varer = [{"navn": v["navn"], "mængde": v.get("maengde"), "enhed": v.get("enhed")} for v in varer]
+    return m.gem_ret(msg.get("ret"), user, navn=msg.get("navn"), varer=varer,
+                     opskrift=msg["opskrift"] if "opskrift" in msg else False)
+
+
+@_ws({vol.Required("ret"): RET_ID, vol.Optional("gange", default=1): vol.All(vol.Coerce(float), vol.Range(min=0.25, max=4))})
+def ws_retter__paa_listen(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.ret_paa_listen(msg["ret"], msg["gange"], user)
+
+
+@_ws({})
+def ws_omregning__hent(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.omregning()
+
+
+@_ws({vol.Optional("aendringer"): dict, vol.Optional("nulstil", default=False): bool})
+def ws_omregning__saet(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.set_omregning(msg.get("aendringer"), user, nulstil=msg["nulstil"])
+
+
+@_ws({vol.Required("tekst"): vol.All(str, vol.Length(min=10, max=5_000_000)), vol.Optional("erstat", default=True): bool})
+def ws_opskrifter__importer(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.importer_opskrifter(msg["tekst"], user, erstat=msg["erstat"])
 
 
 @_ws({vol.Required("bekraeft"): True})

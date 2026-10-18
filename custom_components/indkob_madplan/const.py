@@ -1,7 +1,7 @@
 """Konstanter for Indkøb & Madplan."""
 
 DOMAIN = "indkob_madplan"
-VERSION = "0.10.1"
+VERSION = "0.11.0"
 
 CONF_FROST_DAY = "frost_day"
 CONF_EXTRA_KOED = "extra_koed_ord"
@@ -14,6 +14,8 @@ DEFAULT_TRIP_DELAY = 3.0
 
 FROST_TODAY = "i_dag"
 FROST_TOMORROW = "i_morgen"
+# Fra dette klokkeslæt er dagens aftensmad spist, så optøningen gælder morgendagens ret
+FROST_SKIFT_TIME = 18
 
 NOTE_INDKOB = "indkob"
 NOTE_MADPLAN = "madplan"
@@ -24,6 +26,8 @@ EVENT_HANDLET_IND = f"{DOMAIN}_handlet_ind"
 EVENT_BUTIK_AFSLUTTET = f"{DOMAIN}_butik_afsluttet"
 STORAGE_KEY = DOMAIN
 STORAGE_VERSION = 1
+# Opskriftsbanken (opskrifter + omregning + jeres rettelser) – egen fil, kun i HA (og HA-backup)
+STORAGE_KEY_OPSKRIFTER = f"{DOMAIN}_opskrifter"
 
 URL_BASE = f"/{DOMAIN}_static"
 CARD_FILE = "indkob-madplan-card.js"
