@@ -4,7 +4,7 @@
  * mærk travle aftener (nattevagt, fodbold …), lås det I vil beholde, og bland resten om.
  * "Gem i madplanen" skriver ugen øverst i madplan-noten i jeres eget format.
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.11.0";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -45,8 +45,6 @@ class UgePlan extends HTMLElement {
     this.opts = { nye: lsGet("plan_nye", 1), rester: lsGet("plan_rester", true) };
     this._busy = false;
     this._sheet = null; // åben dag i bund-arket
-    this._step = "plan"; // plan | varer
-    this._valgteVarer = new Set();
     this.shadowRoot.addEventListener("click", (e) => this._click(e));
     this.shadowRoot.addEventListener("input", (e) => this._input(e));
     this.shadowRoot.addEventListener("keydown", (e) => {
@@ -59,7 +57,6 @@ class UgePlan extends HTMLElement {
   async open(store, state) {
     this.store = store;
     this.state = state;
-    this._step = "plan";
     this._sheet = null;
     this.data = null;
     this.days = [];
@@ -189,7 +186,6 @@ class UgePlan extends HTMLElement {
     const d = this.data;
     r.getElementById("pl-titel").textContent = d ? `Planlæg uge ${d.uge}` : "Planlæg ugen";
     r.getElementById("pl-periode").textContent = d ? periode(d.start, d.dage) : "";
-    if (this._step === "varer") return this._renderVarer();
     if (this._fejl && !d) {
       krop.innerHTML = `<div class="fejlboks"><p>${esc(this._fejl)}</p><button class="knap" data-a="igen">Prøv igen</button></div>`;
       r.getElementById("bund").innerHTML = "";
@@ -382,48 +378,6 @@ class UgePlan extends HTMLElement {
     this._lukSheet();
   }
 
-  /* ------------------------------------------------------------ varer efter gem */
-  _renderVarer() {
-    const r = this.shadowRoot;
-    const krop = r.getElementById("krop");
-    const paaListen = new Set(
-      (this.state?.indkob?.lines || []).filter((l) => l.type === "item" && !l.checked && l.text.trim())
-        .map((l) => l.text.trim().toLowerCase().replace(/\s*x\s*\d+$/, ""))
-    );
-    const set = new Set();
-    const grupper = [];
-    for (const d of this.days) {
-      const v = d.valg;
-      if (!v || v.rest_af || d.tags.includes("ude") || !v.varer?.length || (d.eksisterende && !d.aendret)) continue;
-      const varer = v.varer.filter((x) => !set.has(x.toLowerCase()));
-      varer.forEach((x) => set.add(x.toLowerCase()));
-      if (varer.length) grupper.push({ d, v, varer });
-    }
-    this._varerAlle = [...set];
-    const valgt = this._valgteVarer;
-    krop.innerHTML = `
-      <div class="gemt">
-        <div class="ok" aria-hidden="true">✓</div>
-        <h2>Uge ${this.data.uge} er gemt</h2>
-        <p>Den står nu øverst i madplanen.</p>
-      </div>
-      ${grupper.length ? `
-        <h3 class="vh">Mangler I noget til retterne?</h3>
-        <p class="vsub">Sæt flueben ved det, der skal på indkøbslisten. <button class="link" data-a="alle-varer">Vælg alle</button></p>
-        ${grupper.map(({ d, v, varer }) => `
-          <div class="vg">
-            <div class="vgt">${esc(d.ugedag)} · ${esc(lowerFirst(v.navn))}</div>
-            ${varer.map((x) => {
-              const paa = paaListen.has(x.toLowerCase());
-              return `<label class="vare ${paa ? "paa" : ""}"><input type="checkbox" data-a="vare" data-v="${esc(x)}" ${paa ? "disabled checked" : valgt.has(x) ? "checked" : ""}/><span>${esc(x)}</span>${paa ? `<small>står på listen</small>` : ""}</label>`;
-            }).join("")}
-          </div>`).join("")}` : `<p class="vsub">Ingen varer at foreslå for ugens retter.</p>`}`;
-    const n = [...valgt].filter((x) => !paaListen.has(x.toLowerCase())).length;
-    r.getElementById("bund").innerHTML = `
-      <button class="sek" data-a="luk">${n ? "Spring over" : "Luk"}</button>
-      <button class="prim" data-a="tilfoej-varer" ${n ? "" : "disabled"}>${n ? `Tilføj ${n} ${n === 1 ? "vare" : "varer"}` : "Tilføj varer"}</button>`;
-  }
-
   /* ------------------------------------------------------------ gem */
   _linje(day, stor) {
     const ugedag = UGEDAGE[ugedagIdx(day.dato)];
@@ -454,29 +408,14 @@ class UgePlan extends HTMLElement {
         await this.store.send("madplan/indsaet", { linjer, base_version: null });
       }
       this._busy = false;
-      this._step = "varer";
-      this._valgteVarer = new Set();
-      this.shadowRoot.querySelector(".krop").scrollTop = 0;
-      this._renderBody();
+      // Videre til "Varer til ugen" (panelet åbner arket for de gemte dage)
+      this.dispatchEvent(new CustomEvent("toast", { detail: `Uge ${this.data.uge} er gemt i madplanen` }));
+      this.dispatchEvent(new CustomEvent("gemt", { detail: { start: this.data.start, dage: this.data.dage } }));
+      this._luk();
     } catch (e) {
       this._busy = false;
       this._fejl = "Kunne ikke gemme: " + (e?.message || "ukendt fejl");
       this._renderBody();
-    }
-  }
-
-  async _tilfoejVarer() {
-    const paaListen = new Set((this.state?.indkob?.lines || []).filter((l) => l.type === "item" && !l.checked).map((l) => l.text.trim().toLowerCase()));
-    const varer = [...this._valgteVarer].filter((x) => !paaListen.has(x.toLowerCase()));
-    if (!varer.length) return this._luk();
-    const knap = this.shadowRoot.querySelector('[data-a="tilfoej-varer"]');
-    if (knap) knap.disabled = true;
-    try {
-      await this.store.send("indkob/tilfoej", { varer });
-      this.dispatchEvent(new CustomEvent("toast", { detail: `${varer.length} ${varer.length === 1 ? "vare" : "varer"} sat på indkøbslisten`, bubbles: true, composed: true }));
-      this._luk();
-    } catch (e) {
-      if (knap) knap.disabled = false;
     }
   }
 
@@ -500,7 +439,7 @@ class UgePlan extends HTMLElement {
     if (a === "luk") return this._luk();
     if (a === "luk-sheet") return this._lukSheet();
     if (a === "igen") return this._hent({});
-    if (this._busy && !["vare", "alle-varer"].includes(a)) return;
+    if (this._busy) return;
     switch (a) {
       case "bland":
         return this._bland();
@@ -614,29 +553,7 @@ class UgePlan extends HTMLElement {
         this.dispatchEvent(new CustomEvent("toast", { detail: `"${navn}" foreslås ikke igen (kan fortrydes under Indstillinger)`, bubbles: true, composed: true }));
         return;
       }
-      case "vare": {
-        const v = b.dataset.v;
-        b.checked ? this._valgteVarer.add(v) : this._valgteVarer.delete(v);
-        return this._renderVarerBund();
-      }
-      case "alle-varer":
-        (this._varerAlle || []).forEach((x) => {
-          const orig = this.days.flatMap((d) => d.valg?.varer || []).find((y) => y.toLowerCase() === x);
-          if (orig) this._valgteVarer.add(orig);
-        });
-        return this._renderVarer();
-      case "tilfoej-varer":
-        return this._tilfoejVarer();
     }
-  }
-
-  _renderVarerBund() {
-    // opdater kun bundknapperne (bevar scroll i listen)
-    const paaListen = new Set((this.state?.indkob?.lines || []).filter((l) => l.type === "item" && !l.checked).map((l) => l.text.trim().toLowerCase()));
-    const n = [...this._valgteVarer].filter((x) => !paaListen.has(x.toLowerCase())).length;
-    this.shadowRoot.getElementById("bund").innerHTML = `
-      <button class="sek" data-a="luk">${n ? "Spring over" : "Luk"}</button>
-      <button class="prim" data-a="tilfoej-varer" ${n ? "" : "disabled"}>${n ? `Tilføj ${n} ${n === 1 ? "vare" : "varer"}` : "Tilføj varer"}</button>`;
   }
 }
 
@@ -760,21 +677,6 @@ const CSS = `
   .ekstra button { text-align: left; padding: 12px 2px; font-size: 16px; color: var(--im-acc); min-height: 44px; }
   .ekstra .fare { color: var(--error-color, #d93025); font-size: 15px; }
 
-  .gemt { text-align: center; padding: 18px 0 6px; }
-  .gemt .ok { width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 8px; background: var(--im-acc); color: #fff;
-              font-size: 30px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
-  .gemt h2 { margin: 0; font-size: 22px; }
-  .gemt p { margin: 4px 0 0; color: var(--im-dim); }
-  .vh { margin: 22px 2px 2px; font-size: 17px; }
-  .vsub { margin: 0 2px 10px; font-size: 14px; color: var(--im-dim); }
-  .vg { background: var(--im-bg); border-radius: 14px; padding: 6px 14px; margin-bottom: 10px; }
-  .vgt { font-size: 13px; font-weight: 700; color: var(--im-dim); text-transform: uppercase; letter-spacing: .03em; padding: 6px 0 2px; }
-  .vare { display: flex; align-items: center; gap: 12px; min-height: 44px; font-size: 16px; border-top: 1px solid var(--im-line); }
-  .vgt + .vare { border-top: 0; }
-  .vare input { width: 22px; height: 22px; accent-color: var(--im-acc); margin: 0; flex: none; }
-  .vare span { flex: 1; }
-  .vare small { color: var(--im-dim); font-size: 12.5px; }
-  .vare.paa span { color: var(--im-dim); }
   @media (prefers-reduced-motion: reduce) { .ark, .sheet { transition: none; } .dag.skel { animation: none; } }
 `;
 

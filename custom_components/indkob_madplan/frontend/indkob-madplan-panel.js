@@ -2,9 +2,10 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.11.0";
-import "./im-planner.js?v=0.11.0";
-import "./im-retter.js?v=0.11.0";
+} from "./im-common.js?v=0.12.0";
+import "./im-planner.js?v=0.12.0";
+import "./im-retter.js?v=0.12.0";
+import "./im-ugevarer.js?v=0.12.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -134,6 +135,14 @@ class IndkobMadplanPanel extends HTMLElement {
                 </button>
                 <button type="button" class="pr-luk" data-act="pris-spring" aria-label="Ingen pris – spørg ikke igen" title="Ingen pris – spørg ikke igen">×</button>
               </div>
+              <div class="plan-cta pris-cta varer-cta" id="varer-cta-i" hidden>
+                <button type="button" class="pr-hoved" data-act="ugevarer">
+                  <span class="pc-ikon" aria-hidden="true">🛒</span>
+                  <span class="pc-tekst"><b>Varer til ugens retter</b><small class="varer-cta-sub"></small></span>
+                  <span class="pc-pil" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="pr-luk" data-act="ugevarer-skjul" aria-label="Skjul indtil madplanen ændres" title="Skjul indtil madplanen ændres">×</button>
+              </div>
               <form class="hurtig" id="hurtig" autocomplete="off">
                 <input id="ny" type="text" enterkeyhint="done" placeholder="Tilføj vare …" aria-label="Tilføj vare" autocapitalize="sentences" />
               </form>
@@ -175,6 +184,14 @@ class IndkobMadplanPanel extends HTMLElement {
                 <span class="pc-tekst"><b id="plan-cta-titel">Planlæg næste uge</b><small id="plan-cta-sub">Forslag ud fra det, I plejer at spise</small></span>
                 <span class="pc-pil" aria-hidden="true">›</span>
               </button>
+              <div class="plan-cta pris-cta varer-cta" id="varer-cta-m" hidden>
+                <button type="button" class="pr-hoved" data-act="ugevarer">
+                  <span class="pc-ikon" aria-hidden="true">🛒</span>
+                  <span class="pc-tekst"><b>Varer til ugens retter</b><small class="varer-cta-sub"></small></span>
+                  <span class="pc-pil" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="pr-luk" data-act="ugevarer-skjul" aria-label="Skjul indtil madplanen ændres" title="Skjul indtil madplanen ændres">×</button>
+              </div>
               <details class="insp" id="insp">
                 <summary>💡 Inspiration fra tidligere uger</summary>
                 <input id="insp-sog" type="search" placeholder="Søg i madplanen, fx karry …" aria-label="Søg i madplanen" autocomplete="off" />
@@ -426,6 +443,8 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderIndkob();
     this._renderMadplan();
     if (this._planner) this._planner.hassState = s;
+    if (this._ugevarer) this._ugevarer.hassState = s;
+    this._tjekUgevarer();
     if (this._insp.data && this._insp.version !== s.madplan.version) this._renderInsp();
     this.shadowRoot.getElementById("stats-body").innerHTML = statsHTML(s.stats);
     this._renderHelp();
@@ -457,6 +476,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderTools(open);
     this._renderNoteList();
     this._feedSub();
+    this._tjekUgevarer();
     if (open === "madplan") requestAnimationFrame(() => this._autogrow());
   }
 
@@ -545,7 +565,8 @@ class IndkobMadplanPanel extends HTMLElement {
       t.innerHTML = `<button class="vk ovs-knap" data-act="overskrift" aria-pressed="false" title="Gør den markerede linje til overskrift (eller tilbage til vare)">${ICON_OVS}<span>Overskrift</span></button>`;
       this._updateFastBtn();
     } else if (open === "madplan") {
-      t.innerHTML = `<button class="vk" data-act="planlaeg" title="Forslag til næste uges madplan">Planlæg</button>
+      t.innerHTML = `<button class="vk" data-act="ugevarer" title="Varer til ugens retter">Varer</button>
+        <button class="vk" data-act="planlaeg" title="Forslag til næste uges madplan">Planlæg</button>
         <button class="vk" data-act="ny-uge" title="Indsæt en tom uge øverst">Ny uge</button>`;
     } else if (open === "retter") {
       t.innerHTML = `<button class="vk" data-act="ny-ret" title="Ny ret med indkøbsliste">＋ Ny ret</button>`;
@@ -1046,6 +1067,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this.shadowRoot.querySelector("[data-act=ny-linje]").hidden = on;
     this._renderTools("indkob");
     if (this._state) this._renderIndkob();
+    this._renderUgevarerCta();
   }
 
   /* Swipe-slet: vis "Fortryd" i nogle sekunder */
@@ -1282,8 +1304,79 @@ class IndkobMadplanPanel extends HTMLElement {
       if (this._open === "madplan" && ark) ark.scrollTop = 0;
     });
     el.addEventListener("toast", (e) => this._toast(e.detail, { ms: 4000 }));
+    el.addEventListener("gemt", (e) => setTimeout(() => this._openUgevarer(e.detail || {}), 260));
     this.shadowRoot.appendChild(el);
     el.open(this._store, this._state);
+  }
+
+  /* ------------------------------------------------------------ varer til ugen (0.12) */
+  _openUgevarer(opts = {}) {
+    this._flushMadplan();
+    if (this._ugevarer) return;
+    const el = document.createElement("im-ugevarer");
+    this._ugevarer = el;
+    el.addEventListener("luk", () => {
+      el.remove();
+      this._ugevarer = null;
+      this._skjulUgevarerCta(); // set – kommer igen, når madplanen ændres
+    });
+    this.shadowRoot.appendChild(el);
+    el.open(this._store, this._state, opts);
+  }
+
+  /* Kortet "Varer til ugens retter" på indkøbslisten og i madplanen: vises, når ugens retter
+     har varer, der mangler på listen (eller retter uden varer) – indtil madplanen ændres. */
+  _tjekUgevarer() {
+    const s = this._state;
+    if (!s || !this._store) return;
+    const narrow = this.shadowRoot.querySelector(".app")?.classList.contains("smal");
+    const open = this._open || (narrow ? null : "indkob");
+    if (open !== "indkob" && open !== "madplan") return;
+    const nøgle = `${s.madplan.version}|${s.indkob.version}|${new Date().toDateString()}`;
+    if (this._uvNøgle === nøgle) return this._renderUgevarerCta();
+    this._uvNøgle = nøgle;
+    clearTimeout(this._uvT);
+    this._uvT = setTimeout(async () => {
+      try {
+        this._uv = await this._store.send("madplan/varer", {});
+      } catch (e) {
+        this._uv = null;
+      }
+      this._renderUgevarerCta();
+    }, 400);
+  }
+
+  _uvSkjulNøgle() {
+    const d = this._uv;
+    return d ? `${d.start}|${d.madplan_version}` : "";
+  }
+
+  _skjulUgevarerCta() {
+    if (this._uv) lsSet("varer_cta_skjult", this._uvSkjulNøgle());
+    this._renderUgevarerCta();
+  }
+
+  _renderUgevarerCta() {
+    const r = this.shadowRoot;
+    const d = this._uv;
+    const n = d ? d.varer.filter((v) => v.valgt).length : 0;
+    const m = d ? d.mangler.length : 0;
+    // Kun når næste uge er planlagt – eller om fredagen (indkøbsdagen). Midt i ugen er indkøbet
+    // allerede gjort; smutture klares med knappen Varer i madplanen.
+    const relevant = !!d && (d.start === d.perioder?.[1]?.start || new Date().getDay() === 5);
+    const vis = relevant && (n > 0 || m > 0) && lsGet("varer_cta_skjult", "") !== this._uvSkjulNøgle();
+    const p = d?.perioder?.find((x) => x.start === d.start);
+    const sub = vis ? [
+      p ? p.titel : "",
+      n ? `${n} ${n === 1 ? "vare mangler" : "varer mangler"} på listen` : "",
+      m ? `${m} ${m === 1 ? "ret" : "retter"} uden varer` : "",
+    ].filter(Boolean).join(" · ") : "";
+    for (const id of ["varer-cta-i", "varer-cta-m"]) {
+      const el = r.getElementById(id);
+      if (!el) continue;
+      el.hidden = !vis || (id === "varer-cta-i" && this._shop);
+      el.querySelector(".varer-cta-sub").textContent = sub;
+    }
   }
 
   /* ------------------------------------------------------------ inspiration */
@@ -1528,6 +1621,17 @@ class IndkobMadplanPanel extends HTMLElement {
       r.getElementById("ark").scrollTop = 0;
     } else if (act === "planlaeg") {
       this._openPlanner();
+    } else if (act === "ugevarer") {
+      this._openUgevarer();
+    } else if (act === "ugevarer-skjul") {
+      this._skjulUgevarerCta();
+    } else if (act === "stat-slet") {
+      const navn = b.dataset.navn;
+      if (navn && confirm(`Fjern "${navn}" fra statistikken?\n\nKøbene af varen slettes fra statistikken. Listen og indkøbshistorikken røres ikke.`)) {
+        this._store.send("stats/slet_vare", { navn })
+          .then((res) => this._toast(res.slettet ? `"${navn}" er fjernet fra statistikken` : `"${navn}" var ikke i statistikken`, { ms: 3500 }))
+          .catch(() => this._setStatus("Kunne ikke fjerne varen"));
+      }
     } else if (act === "vis-ret") {
       b.disabled = true;
       await this._store.send("madplan/skjul", { navn: b.dataset.navn, skjul: false });

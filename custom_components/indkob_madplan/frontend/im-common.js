@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.11.0";
+export const VERSION = "0.12.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -742,7 +742,8 @@ export class Checklist {
         (this.editable
           ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />${pin}` +
             `<span class="grip" role="button" aria-label="Træk for at flytte varen" title="Træk for at flytte">${GRIP}</span>`
-          : `<span class="tx"></span>${pin}`);
+          : `<span class="tx"></span>${pin}`) +
+        `<span class="retm"></span>`;
     } else if (ln.type === "header") {
       inner = this.editable
         ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Overskrift" />`
@@ -763,6 +764,13 @@ export class Checklist {
     row.classList.toggle("koebt", !!butik);
     if (butik) row.firstElementChild.dataset.butik = butik;
     else delete row.firstElementChild.dataset.butik;
+    // Retmærke: hvilke af ugens retter varen skal bruges til (sat af "Varer til ugen" / Retter)
+    const retm = row.querySelector(".retm");
+    if (retm) {
+      const t = ln.type === "item" && Array.isArray(ln.ret) ? ln.ret.join(" · ") : "";
+      row.classList.toggle("harret", !!t);
+      if (retm.textContent !== t) retm.textContent = t;
+    }
     const chk = row.querySelector(".chk");
     if (chk) chk.setAttribute("aria-checked", String(!!ln.checked));
     const tx = row.querySelector(".tx");
@@ -967,6 +975,7 @@ export function statsHTML(s) {
   const top = (s.top || [])
     .slice(0, 12)
     .map((t) => `<li><span class="tn">${esc(t.navn)}</span><span class="tc">${t.antal}×</span>
+      <button class="tslet" type="button" data-act="stat-slet" data-navn="${esc(t.navn)}" aria-label="Fjern ${esc(t.navn)} fra statistikken" title="Fjern fra statistikken">×</button>
       <span class="ti">${t.interval_dage ? "ca. hver " + Math.round(t.interval_dage) + ". dag" : "købt " + relTime(t.sidst)}</span></li>`)
     .join("");
   const sporet = s.sporet_siden ? new Date(s.sporet_siden).toLocaleDateString("da-DK", { day: "numeric", month: "long" }) : "";
@@ -1091,6 +1100,12 @@ export const BASE_CSS = `
   button.pin { cursor: pointer; }
   button.pin:active { background: var(--im-bg2); }
   .cl.nocheck .ln.item .inner { padding-left: 2px; }
+  .ln .retm { display: none; position: absolute; left: 36px; right: 64px; bottom: 4px; font-size: 12px; line-height: 1.2;
+              color: var(--im-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  .cl.nocheck .ln .retm { left: 2px; }
+  .ln.harret .retm { display: block; }
+  .ln.harret .tx { padding-bottom: 22px; }
+  .ln.harret.done .retm { opacity: .6; }
   .ln.koebt .inner::after { content: attr(data-butik); order: 2; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
                             white-space: nowrap; font-size: 12px; color: var(--im-dim); padding: 2px 8px; border-radius: 10px; background: var(--im-bg2); }
   .ln.koebt .grip { order: 3; }
@@ -1147,7 +1162,9 @@ export const BASE_CSS = `
   .bv, .bl { font-size: .7rem; color: var(--im-dim); }
   .bl { margin-top: 3px; }
   .top { list-style: none; margin: 0; padding: 0; }
-  .top li { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--im-line); }
+  .top li { display: grid; grid-template-columns: 1fr auto auto; column-gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--im-line); }
+  .tslet { width: 32px; height: 32px; margin: -6px -6px -6px 0; border-radius: 50%; font-size: 18px; line-height: 1; color: var(--im-dim); opacity: .55; }
+  .tslet:active { background: var(--im-bg2); opacity: 1; }
   .tn { font-weight: 500; }
   .tc { font-variant-numeric: tabular-nums; font-weight: 700; }
   .ti { grid-column: 1 / -1; font-size: .8rem; color: var(--im-dim); }
