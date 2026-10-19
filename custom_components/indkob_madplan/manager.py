@@ -370,6 +370,9 @@ class IndkobMadplanManager:
         slet = [ln for ln in self.indkob.items() if ln["checked"] and not self.is_fast(ln["text"])]
         if slet:
             self.indkob.delete([ln["id"] for ln in slet])
+        for ln in self.indkob.items():
+            if ln["checked"]:
+                ln.pop("ret", None)  # købt til ugens retter – den faste vare starter forfra
         self.indkob.uncheck_all()
         tilbage = []
         for b in self.basis.items():
@@ -987,14 +990,199 @@ class IndkobMadplanManager:
             if ex := self._existing(t):
                 if ex["checked"]:
                     self.indkob.update(ex["id"], checked=False)
+                _tag_ret(ex, [rnavn])
                 fandtes.append(ex["text"])
                 continue
-            nye.append(self.indkob.add(t, line_type=TYPE_ITEM, auto_place=True))
+            ln = self.indkob.add(t, line_type=TYPE_ITEM, auto_place=True)
+            _tag_ret(ln, [rnavn])
+            nye.append(ln)
         self._log(user, "indkob", f'lagde {len(nye)} {"vare" if len(nye) == 1 else "varer"} fra "{rnavn}" på listen'
                   + (f" ({len(fandtes)} stod der i forvejen)" if fandtes else ""))
         self.indkob_changed(user)
         return {"ret": rnavn, "tilfoejet": [ln["text"] for ln in nye], "ids": [ln["id"] for ln in nye],
                 "fandtes": fandtes}
+
+    # ------------------------------------------------------------ varer til ugen (0.12)
+    def _perioder(self, today: date) -> list[dict]:
+        """Resten af indkøbsugen (fre → tor) og næste uge. Fredag er "denne uge" hele ugen."""
+        wd = today.weekday()
+        naeste_fre = today + timedelta(days=(4 - wd) % 7 or 7)
+        nu_dage = (naeste_fre - today).days
+        return [
+            {"id": "nu", "start": today.isoformat(), "dage": nu_dage,
+             "titel": "Denne uge" if wd == 4 else "Resten af ugen"},
+            {"id": "naeste", "start": naeste_fre.isoformat(), "dage": 7, "titel": "Næste uge"},
+        ]
+
+    def _har_vi_altid(self) -> set[str]:
+        try:
+            return {a.lower() for a in self.bank.omregning["har_vi_altid"]}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    def _ret_for_dag(self, a: pl.Aften) -> tuple[str | None, str, str | None]:
+        """(ret-id, navn, kilde) for en aften: jeres egen ret, ellers en opskrift med samme navn."""
+        eid = "e:" + dish_key(a.navn)
+        if eid != "e:" and self.bank.varer(eid):
+            return eid, self._egen_navn(eid), "egen"
+        bedst, score = None, 0.0
+        for r in self.bank.raa:
+            s = op.ligner(a.navn, op.paen_titel(r["titel"]))
+            if s > score:
+                bedst, score = r, s
+        if bedst and score >= 0.85 and self.bank.varer("r:" + bedst["id"]):
+            return "r:" + bedst["id"], op.paen_titel(bedst["titel"]), "opskrift"
+        return (eid if eid != "e:" else None), a.navn, None
+
+    def _senest_koebt(self, navn: str, siden: date) -> str | None:
+        """Hvornår varen sidst blev krydset af (dato), hvis det er sket fra og med `siden`."""
+        key = normalize(navn)
+        if not key:
+            return None
+        st = kat.stamme(key)
+        for ev in reversed(self.history.events):
+            if ev["type"] != "buy" or (ev["k"] != key and kat.stamme(ev["k"]) != st):
+                continue
+            d = datetime.fromisoformat(ev["t"]).date()
+            return d.isoformat() if d >= siden else None
+        return None
+
+    def ugens_varer(self, start: date | None = None, dage: int | None = None) -> dict:
+        """Varer til ugens retter: samlet fra madplanen, kød fra fryseren og det, I har, fravalgt."""
+        today = dt_util.now().date()
+        perioder = self._perioder(today)
+        if start is None:
+            nu, naeste = perioder
+            # Fredag: denne uge. Ellers næste uge, så snart den er begyndt at blive planlagt.
+            n_start = date.fromisoformat(naeste["start"])
+            planlagt = any(self.madplan.get(n_start + timedelta(days=i)) and self.madplan[n_start + timedelta(days=i)].ret
+                           for i in range(7))
+            valgt = nu if (today.weekday() == 4 or not planlagt) else naeste
+            start, dage = date.fromisoformat(valgt["start"]), valgt["dage"]
+        dage = max(1, min(dage or 7, 14))
+        slut = start + timedelta(days=dage - 1)
+        # Købt siden fredag tæller for resten af denne uge; for næste uge kun det, der er købt i dag
+        sidste_fre = today - timedelta(days=(today.weekday() - 4) % 7)
+        koebt_siden = sidste_fre if start < date.fromisoformat(perioder[1]["start"]) else today
+        try:
+            aftener = {a.dato: a for a in pl.laes_historik(self.madplan)}
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Kunne ikke læse madplanen")
+            aftener = {}
+        altid = self._har_vi_altid()
+        varer: dict[str, dict] = {}
+        skjult: list[str] = []
+        ud_dage: list[dict] = []
+        for i in range(dage):
+            d = start + timedelta(days=i)
+            dag = self.madplan.get(d)
+            a = aftener.get(d)
+            item = {"dato": d.isoformat(), "ugedag": UGEDAGE[d.weekday()], "tekst": (dag.raw if dag else "") or "",
+                    "slags": a.slags if a else "tom", "navn": a.navn if a else "", "ret": None, "kilde": None,
+                    "gange": 1, "antal": 0}
+            if a is None or a.slags != "ret":
+                ud_dage.append(item)
+                continue
+            ret_id, navn, kilde = self._ret_for_dag(a)
+            gange = 2 if a.stor else 1
+            item.update(ret=ret_id, navn=navn, kilde=kilde, gange=gange)
+            liste = self.bank.varer(ret_id) if (ret_id and kilde) else None
+            if liste and ret_id.startswith("r:") and (k := self.bank.konverteret().get(ret_id[2:])):
+                for n in k["har_vi_altid"]:  # opskriftens "Har vi altid" er allerede sorteret fra
+                    if n not in skjult:
+                        skjult.append(n)
+            if not liste:
+                kanon = pl.kanonisk(a.navn) or a.navn
+                item["forslag_varer"] = list(pl.RETTER.get(kanon, {}).get("varer", []))
+                item["forslag_opskrifter"] = [
+                    {"id": "r:" + r["id"], "navn": op.paen_titel(r["titel"])}
+                    for s, r in sorted(((op.ligner(a.navn, op.paen_titel(r["titel"])), r) for r in self.bank.raa),
+                                       key=lambda x: -x[0])[:2] if s >= 0.5
+                ]
+                ud_dage.append(item)
+                continue
+            for v in liste:
+                navn_v = v["navn"].strip()
+                if not navn_v:
+                    continue
+                if navn_v.lower() in altid:
+                    if navn_v not in skjult:
+                        skjult.append(navn_v)
+                    continue
+                k = kat.stamme(normalize(navn_v) or navn_v.lower())
+                it = varer.setdefault(k, {"navn": navn_v, "maengder": {}, "uden_maengde": False, "retter": [], "dage": []})
+                q = v.get("mængde")
+                e = v.get("enhed") or ""
+                if q is None or e not in op.LISTE_ENHED:
+                    it["uden_maengde"] = True
+                else:
+                    it["maengder"][e] = (it["maengder"].get(e) or 0) + q * gange
+                if navn not in it["retter"]:
+                    it["retter"].append(navn)
+                if d.isoformat() not in it["dage"]:
+                    it["dage"].append(d.isoformat())
+                item["antal"] += 1
+            ud_dage.append(item)
+        ud = []
+        for it in varer.values():
+            dele = [op.liste_tekst({"navn": "", "mængde": round(q, 2), "enhed": e}).strip()
+                    for e, q in it["maengder"].items()]
+            tekst = (it["navn"] + " " + " + ".join(x for x in dele if x)).strip()
+            ex = self._existing(it["navn"])
+            koebt = None if ex else self._senest_koebt(it["navn"], koebt_siden)
+            koed = er_fryserkoed(it["navn"])
+            grund = ("i kurven" if ex["checked"] else "står på listen") if ex else (
+                "kød fra fryseren" if koed else (f"købt {UGEDAGE[date.fromisoformat(koebt).weekday()].lower()}" if koebt else None))
+            noegle = kat.gaet(it["navn"]) or kat.FALLBACK
+            ud.append({
+                "navn": it["navn"], "tekst": tekst, "retter": it["retter"], "dage": it["dage"],
+                "kategori": kat.NAVN.get(noegle, ""), "orden": kat.ORDEN.get(noegle, 99),
+                "koed": koed, "paa_listen": bool(ex), "linje_id": ex["id"] if ex else None, "koebt": koebt,
+                "valgt": not (ex or koed or koebt), "grund": grund,
+            })
+        ud.sort(key=lambda x: (x["orden"], x["navn"].lower()))
+        for x in ud:
+            del x["orden"]
+        return {
+            "start": start.isoformat(), "slut": slut.isoformat(), "dage": dage,
+            "uge": start.isocalendar()[1], "perioder": perioder,
+            "dage_liste": ud_dage, "varer": ud, "har_vi_altid": skjult,
+            "mangler": [x for x in ud_dage if x["slags"] == "ret" and not x["antal"]],
+            "madplan_version": self.madplan_note.version,
+        }
+
+    @callback
+    def tilfoej_til_retter(self, varer: list[dict], user: str | None = None) -> dict:
+        """Læg ugens varer på listen med retmærke (står varen der, får den bare mærket)."""
+        nye, fandtes = [], []
+        for v in varer:
+            tekst = (v.get("tekst") or "").strip()
+            if not tekst:
+                continue
+            retter_ = [r for r in (v.get("retter") or []) if r][:4]
+            if ex := self._existing(tekst):
+                _tag_ret(ex, retter_)
+                fandtes.append(ex["text"])
+                continue
+            ln = self.indkob.add(tekst, line_type=TYPE_ITEM, auto_place=True)
+            _tag_ret(ln, retter_)
+            nye.append(ln)
+        if nye or fandtes:
+            self._log(user, "indkob", f'lagde {len(nye)} {"vare" if len(nye) == 1 else "varer"} til ugens retter på listen'
+                      + (f" ({len(fandtes)} stod der i forvejen)" if fandtes else ""))
+            self.indkob_changed(user)
+        return {"tilfoejet": [ln["text"] for ln in nye], "ids": [ln["id"] for ln in nye], "fandtes": fandtes}
+
+    @callback
+    def slet_statistik_vare(self, navn: str, user: str | None = None) -> int:
+        """Fjern en vare fra statistikken (fx testvarer) – listen og indkøbsturene røres ikke."""
+        n = self.history.remove_key(normalize(navn) or navn.strip().lower())
+        if n:
+            self._log(user, "statistik", f'fjernede "{navn.strip()}" fra statistikken ({n} {"hændelse" if n == 1 else "hændelser"})')
+            self.stats = self.history.compute(dt_util.now())
+            self._save()
+            self._notify()
+        return n
 
     def omregning(self) -> dict:
         o = self.bank.omregning
@@ -1427,3 +1615,25 @@ def _payments_text(betalinger: list[dict]) -> str:
     if not betalinger:
         return "ingen pris"
     return ", ".join(f"{b['butik'] or 'ukendt butik'} {_kr(b['beloeb'])}" for b in betalinger)
+
+
+# Kød der købes friskt (ikke fra fryseren), selv om det står under Køl – kød
+_FRISK_KOED = ("bacon", "pølse", "skinke", "pancetta", "guanciale", "nduja", "chorizo", "salami", "pålæg",
+               "leverpostej", "røget", "rullepølse", "spegepølse")
+
+
+def er_fryserkoed(navn: str) -> bool:
+    """Kød/fisk til aftensmaden, som familien tager op af fryseren i stedet for at købe."""
+    low = (navn or "").lower()
+    return kat.gaet(navn) == "kod" and not any(w in low for w in _FRISK_KOED)
+
+
+def _tag_ret(line: dict, navne: list[str]) -> None:
+    """Retmærke på en vare: hvilke retter den skal bruges til (vises under varen)."""
+    if not navne:
+        return
+    cur = [r for r in line.get("ret") or [] if r]
+    for n in navne:
+        if n and n not in cur:
+            cur.append(n)
+    line["ret"] = cur[-4:]

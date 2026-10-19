@@ -201,6 +201,17 @@ class History:
                 return False
         return False
 
+    def remove_key(self, key: str) -> int:
+        """Slet alle hændelser for en vare (fx testvarer). Returnerer antal slettede."""
+        if not key:
+            return 0
+        before = len(self.events)
+        self.events = [e for e in self.events if e["k"] != key]
+        n = before - len(self.events)
+        if n or key in self.names:
+            self.names.pop(key, None)
+        return n
+
     def open_keys(self) -> set[str]:
         if not self.snapshot:
             return set()

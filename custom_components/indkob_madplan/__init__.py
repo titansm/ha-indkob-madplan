@@ -65,6 +65,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd, ws_indkob__fast,
         ws_retter__liste, ws_retter__hent, ws_retter__gem, ws_retter__paa_listen,
         ws_omregning__hent, ws_omregning__saet, ws_opskrifter__importer,
+        ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -381,6 +382,28 @@ def ws_omregning__saet(m: IndkobMadplanManager, msg: dict, user: str | None) -> 
 @_ws({vol.Required("tekst"): vol.All(str, vol.Length(min=10, max=5_000_000)), vol.Optional("erstat", default=True): bool})
 def ws_opskrifter__importer(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.importer_opskrifter(msg["tekst"], user, erstat=msg["erstat"])
+
+
+@_ws({
+    vol.Optional("start"): vol.Any(cv.date, None),
+    vol.Optional("dage"): vol.Any(vol.All(vol.Coerce(int), vol.Range(min=1, max=14)), None),
+})
+def ws_madplan__varer(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    """Varer til ugens retter (arket "Varer til ugen")."""
+    return m.ugens_varer(msg.get("start"), msg.get("dage"))
+
+
+@_ws({vol.Required("varer"): vol.All([{
+    vol.Required("tekst"): vol.All(str, vol.Length(min=1, max=200)),
+    vol.Optional("retter", default=list): [vol.All(str, vol.Length(max=120))],
+}], vol.Length(max=120))})
+def ws_indkob__tilfoej_retter(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.tilfoej_til_retter(msg["varer"], user)
+
+
+@_ws({vol.Required("navn"): vol.All(str, vol.Length(min=1, max=200))})
+def ws_stats__slet_vare(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return {"slettet": m.slet_statistik_vare(msg["navn"], user)}
 
 
 @_ws({vol.Required("bekraeft"): True})
