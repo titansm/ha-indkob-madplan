@@ -5,11 +5,15 @@
  *           hurtig_tilfoej (true) – med kun_i_dag: ＋-knap der folder et felt ud til indkøbslisten
  *           forslag (true) – med kun_i_dag: "plejer I at købe"-knapper i det udfoldede felt
  *           vis_i_morgen (false) – med kun_i_dag: også morgendagens ret
+ *           (fra kl. 18 viser den kompakte række morgendagens ret – "I morgen")
  */
 import * as C from "./im-common.js?v=0.12.0";
 
 // Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
 C.resumeIfShopping();
+
+// Familien spiser 17–18; herefter viser den kompakte række morgendagens ret (= const.FROST_SKIFT_TIME).
+const AFTEN_SLUT_TIME = 18;
 
 class IndkobMadplanCard extends HTMLElement {
   constructor() {
@@ -211,9 +215,13 @@ class IndkobMadplanCard extends HTMLElement {
     const dage = mp.dage || [];
     const idag = dage.find((d) => d.offset === 0);
     const imorgen = dage.find((d) => d.offset === 1);
-    const ret = idag?.ret || "";
-    const noter = [...(idag?.noter || []), idag?.stor_portion ? "stor portion" : ""].filter(Boolean);
-    over.innerHTML = `I aften${noter.length ? `<span class="not"> · ${C.esc(noter.join(" · "))}</span>` : ""}`;
+    // Fra kl. 18 er aftensmaden spist → rækken viser morgendagens ret (samme skift som optøningen;
+    // backenden sender ny tilstand kl. 18:00 og ved midnat, så kortet tegnes om af sig selv).
+    const visImorgen = new Date().getHours() >= AFTEN_SLUT_TIME;
+    const dag = visImorgen ? imorgen : idag;
+    const ret = dag?.ret || "";
+    const noter = [...(dag?.noter || []), dag?.stor_portion ? "stor portion" : ""].filter(Boolean);
+    over.innerHTML = `${visImorgen ? "I morgen" : "I aften"}${noter.length ? `<span class="not"> · ${C.esc(noter.join(" · "))}</span>` : ""}`;
     titel.textContent = ret || "Intet på madplanen";
     titel.title = ret;
     rk.classList.toggle("tom", !ret);
@@ -223,7 +231,7 @@ class IndkobMadplanCard extends HTMLElement {
       const koed = (frostDag.koed || [])[0] || "kød";
       linjer.push(`<span class="frost-l"><ha-icon icon="mdi:snowflake"></ha-icon>Tag ${C.esc(koed)}${mp.frost_dag === "i morgen" ? " op til i morgen" : " op af fryseren"}</span>`);
     }
-    if (this._config.vis_i_morgen && imorgen?.ret)
+    if (this._config.vis_i_morgen && !visImorgen && imorgen?.ret)
       linjer.push(`<span class="imorgen-l">I morgen: <b>${C.esc(imorgen.ret)}</b></span>`);
     ekstra.innerHTML = linjer.join("");
     rk.classList.toggle("koldt", !!frostDag?.kraever_optoening);
