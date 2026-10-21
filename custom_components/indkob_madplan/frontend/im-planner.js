@@ -3,8 +3,13 @@
  * Telefon først: ét ark med en kort pr. dag. Tryk på retten for andre forslag, ↻ for næste bud,
  * mærk travle aftener (nattevagt, fodbold …), lås det I vil beholde, og bland resten om.
  * "Gem i madplanen" skriver ugen øverst i madplan-noten i jeres eget format.
+ *
+ * Portion (0.12.2): portionen hører til dagen, ikke retten. En dag kan laves dobbelt uden at
+ * resterne står på en bestemt dag (fryser/frokost), eller med rester på én eller flere af de
+ * næste dage. Byttes retten på dagen, følger resterne med; vælges "Normal", får rester-dagene
+ * et nyt bud.
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.0";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.2";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -102,11 +107,26 @@ class UgePlan extends HTMLElement {
         });
       }
       this.data = res;
+      if (kunDag === null) await this._afstem();
     } catch (e) {
       this._fejl = e?.message || "Kunne ikke lave forslag.";
     }
     this._busy = false;
     this._render();
+  }
+
+  /* Efter et nyt bud på hele ugen: rester I selv har sat, følger dagens nye ret */
+  async _afstem() {
+    for (let j = 0; j < this.days.length; j++) {
+      const d = this.days[j];
+      if (!d.restFra || !d.valg?.rest_af) continue;
+      const k = this.days.findIndex((x) => x.dato === d.restFra);
+      if (k >= 0 && k < j && this._lavesMad(k)) {
+        if (this.days[k].valg.navn !== d.valg.rest_af) this._saetRest(k, j);
+      } else {
+        await this._fjernRest(j);
+      }
+    }
   }
 
   _fraServer(p) {
@@ -125,6 +145,8 @@ class UgePlan extends HTMLElement {
       idx: 0,
       udeTekst: p.tags.includes("ude") ? (p.kalender[0] || "") : "",
       visTags: false,
+      dobbelt: !!p.stor_portion, // dobbelt portion uden (eller ud over) en rester-dag
+      restFra: null, // dato for den dag, resterne kommer fra (sat når I selv vælger det)
     };
   }
 
@@ -141,21 +163,101 @@ class UgePlan extends HTMLElement {
     return Object.fromEntries(this.days.map((d) => [d.dato, d.tags]));
   }
 
-  _replanDag(i) {
-    return this._hent({ tags: this._tagsMap(), laaste: this._laaste(i) }, { kunDag: i });
+  async _replanDag(i, extra = {}) {
+    const rd = this._restDage(i);
+    await this._hent({ tags: this._tagsMap(), laaste: this._laaste(i), ...extra }, { kunDag: i });
+    await this._kildeSkift(i, rd);
   }
 
   _bland() {
     return this._hent({ tags: this._tagsMap(), laaste: this._laaste() });
   }
 
-  /* Dobbelt portion: en dag hvis ret spises som rester senere i ugen */
-  _storDage() {
-    const s = new Set();
-    this.days.forEach((d) => {
-      if (d.valg?.rest_af && !d.tags.includes("ude")) s.add(d.valg.rest_af.toLowerCase());
-    });
-    return s;
+  /* ------------------------------------------------------------ portion og rester */
+  _lavesMad(i) {
+    const d = this.days[i];
+    return !!(d && d.valg && !d.valg.rest_af && !d.tags.includes("ude"));
+  }
+
+  /* Den dag resterne på dag j kommer fra (-1 = ukendt/før planen) */
+  _kildeIdx(j) {
+    const d = this.days[j];
+    const r = d?.valg?.rest_af;
+    if (!r || d.tags.includes("ude")) return -1;
+    if (d.restFra) {
+      const k = this.days.findIndex((x) => x.dato === d.restFra);
+      if (k >= 0 && k < j && this._lavesMad(k)) return k;
+    }
+    for (let k = j - 1; k >= 0 && k >= j - 4; k--) {
+      if (this._lavesMad(k) && this.days[k].valg.navn.toLowerCase() === r.toLowerCase()) return k;
+    }
+    return -1;
+  }
+
+  /* Dagene der spiser rester af dag i */
+  _restDage(i) {
+    const out = [];
+    for (let j = i + 1; j < this.days.length; j++) if (this._kildeIdx(j) === i) out.push(j);
+    return out;
+  }
+
+  _erDobbelt(i) {
+    return this._lavesMad(i) && (this.days[i].dobbelt || this._restDage(i).length > 0);
+  }
+
+  _restValg(i) {
+    const src = this.days[i];
+    return {
+      navn: `${src.valg.navn} rest`,
+      tekst: `${lowerFirst(src.valg.navn)} rest`,
+      rest_af: src.valg.navn,
+      protein: src.valg.protein,
+      base: src.valg.base,
+      effort: 1,
+      grunde: [`Rester fra ${src.ugedag.toLowerCase()}`, "Ingen madlavning"],
+      varer: [],
+    };
+  }
+
+  _saetRest(i, j) {
+    const d = this.days[j];
+    d.valg = this._restValg(i);
+    d.restFra = this.days[i].dato;
+    d.tags = d.tags.filter((t) => t !== "ude");
+    d.laast = true;
+    d.aendret = true;
+  }
+
+  /* Rester-dag j skal ikke længere have rester: få et nyt bud (uden rester) */
+  async _fjernRest(j) {
+    const d = this.days[j];
+    d.restFra = null;
+    d.valg = null;
+    d.laast = false;
+    d.aendret = true;
+    await this._replanDag(j, { rester: false });
+    this.days[j].aendret = true;
+  }
+
+  /* Retten på dag i er skiftet: rester-dagene (rd) følger med, eller får nyt bud */
+  async _kildeSkift(i, rd) {
+    for (const j of rd) {
+      if (!this.days[j]) continue;
+      if (this._lavesMad(i)) this._saetRest(i, j);
+      else await this._fjernRest(j);
+    }
+  }
+
+  /* Grunde under retten – med jeres portion i stedet for planlæggerens "Lav dobbelt …" */
+  _grunde(i) {
+    const v = this.days[i].valg;
+    let g = (v?.grunde || []).filter((x) => !x.startsWith("Lav dobbelt"));
+    if (this._lavesMad(i)) {
+      const rd = this._restDage(i);
+      if (rd.length) g = [`Rester til ${rd.map((j) => this.days[j].ugedag.toLowerCase()).join(" og ")}`, ...g];
+      else if (this.days[i].dobbelt) g = ["Rester til fryseren eller frokost", ...g];
+    }
+    return g.slice(0, 3);
   }
 
   /* ------------------------------------------------------------ render */
@@ -197,17 +299,17 @@ class UgePlan extends HTMLElement {
       r.getElementById("bund").innerHTML = "";
       return;
     }
-    const stor = this._storDage();
     krop.innerHTML = `
       ${this._introHTML()}
       ${this._fejl ? `<p class="fejl">${esc(this._fejl)}</p>` : ""}
-      <ol class="dage ${this._busy ? "travl" : ""}">${this.days.map((day, i) => this._dagHTML(day, i, stor)).join("")}</ol>
+      <ol class="dage ${this._busy ? "travl" : ""}">${this.days.map((day, i) => this._dagHTML(day, i)).join("")}</ol>
       ${this._balanceHTML()}
       <details class="hvordan">
         <summary>Sådan finder den forslagene</summary>
         <p>Forslagene bygger på ${d.grundlag.aftener} aftener fra jeres madplan. Retter I spiser tit, vægter mest – men kun når det er ved at være tid igen: hver ret har sin egen rytme (pita ca. hver 10. aften, lasagne sjældnere), og en ret I lige har haft, venter.</p>
         <p>Vaner på ugedage tæller med (burger om fredagen), og på travle aftener – nattevagt, fodbold, én voksen – vælges nemme retter, eller rester fra en dobbelt portion dagen før. Der er variation i kød og tilbehør, og der er lidt tilfældighed, så ugerne ikke bliver ens.</p>
         <p>Nye retter ligner altid noget, I allerede kan lide. Tryk på en ret for flere bud, og vælg "Vis ikke igen" for retter, I er færdige med.</p>
+        <p>Portion: tryk på retten og vælg Normal eller Dobbelt. Dobbelt kan være uden en bestemt dag (fryser/frokost) eller med rester på en af de næste dage.</p>
       </details>`;
     r.getElementById("bund").innerHTML = `
       <button class="sek" data-a="bland" ${this._busy ? "disabled" : ""}>${ICON_SHUFFLE}<span>Bland</span></button>
@@ -238,18 +340,18 @@ class UgePlan extends HTMLElement {
       </div>`;
   }
 
-  _dagHTML(day, i, stor) {
+  _dagHTML(day, i) {
     const v = day.valg;
     const ude = day.tags.includes("ude");
     const tags = this.data.tags;
     const aktive = TAG_ORDEN.filter((t) => day.tags.includes(t) && t !== "ude");
-    const erStor = v && !v.rest_af && stor.has(v.navn.toLowerCase());
+    const erStor = this._erDobbelt(i);
     const badges = [];
     if (v?.nyt) badges.push(`<span class="badge nyt">Nyt</span>`);
     if (v?.rest_af) badges.push(`<span class="badge rest">Rester</span>`);
     if (erStor) badges.push(`<span class="badge stor">Lav dobbelt portion</span>`);
     if (day.eksisterende && !day.aendret) badges.push(`<span class="badge ek">Står i madplanen</span>`);
-    const grunde = v?.grunde?.length ? v.grunde.join(" · ") : "";
+    const grunde = this._grunde(i).join(" · ");
     const ikon = v && !v.rest_af && v.protein ? `<span class="pi" title="${esc(PROTEIN_NAVN[v.protein] || "")}">${PROTEIN[v.protein] || ""}</span>` : "";
     return `
       <li class="dag ${day.laast ? "laast" : ""} ${ude ? "ude" : ""} ${v?.rest_af ? "rester" : ""}" data-i="${i}">
@@ -298,6 +400,7 @@ class UgePlan extends HTMLElement {
 
   /* ------------------------------------------------------------ bund-ark med forslag */
   _aabnSheet(i) {
+    clearTimeout(this._skjulTimer); // et netop lukket ark må ikke skjule det nye
     this._sheet = i;
     this._sog = "";
     this._renderSheet();
@@ -312,7 +415,7 @@ class UgePlan extends HTMLElement {
     const s = r.getElementById("sheet");
     s.classList.remove("inde");
     r.getElementById("sheet-bg").hidden = true;
-    setTimeout(() => (s.hidden = true), 200);
+    this._skjulTimer = setTimeout(() => (s.hidden = true), 200);
     this._sheet = null;
   }
 
@@ -331,9 +434,44 @@ class UgePlan extends HTMLElement {
       </div>
       <input id="sog" type="search" placeholder="Søg i jeres retter eller skriv en ny …" autocomplete="off" enterkeyhint="done" aria-label="Søg eller skriv en ret" />
       <div class="alts" id="alts">${this._altsHTML(day, brugt)}</div>
+      ${this._portionHTML(i)}
       <div class="ekstra">
         <button data-a="ude">${day.tags.includes("ude") ? "Lav mad alligevel" : "Ingen madlavning (ude, besøg …)"}</button>
         ${v && !v.rest_af && !day.tags.includes("ude") ? `<button class="fare" data-a="skjul">Foreslå ikke "${esc(lowerFirst(v.navn))}" igen</button>` : ""}
+      </div>`;
+  }
+
+  _portionHTML(i) {
+    if (!this._lavesMad(i)) return "";
+    const day = this.days[i];
+    const dobbelt = this._erDobbelt(i);
+    const rd = new Set(this._restDage(i));
+    const tags = this.data.tags;
+    const senere = [];
+    for (let j = i + 1; j < this.days.length && j <= i + 3; j++) {
+      const d = this.days[j];
+      if (d.tags.includes("ude")) continue;
+      const travl = TAG_ORDEN.find((t) => d.tags.includes(t) && tags[t]?.travl);
+      senere.push(`<button class="pc" data-a="rest-dag" data-j="${j}" aria-pressed="${rd.has(j)}">${esc(KORT[ugedagIdx(d.dato)])} ${kortDato(d.dato)}${travl ? ` <small>${esc(tags[travl].label)}</small>` : ""}</button>`);
+    }
+    return `
+      <div class="portion" role="group" aria-label="Portion">
+        <div class="p-top">
+          <span class="pl">Portion</span>
+          <div class="seg">
+            <button data-a="portion" data-p="normal" aria-pressed="${!dobbelt}">Normal</button>
+            <button data-a="portion" data-p="dobbelt" aria-pressed="${dobbelt}">Dobbelt</button>
+          </div>
+        </div>
+        ${dobbelt ? `
+          <div class="p-rest">
+            <span class="pl">Rester</span>
+            <div class="pchips">
+              <button class="pc" data-a="rest-dag" data-j="-1" aria-pressed="${rd.size === 0}">Ingen dag</button>
+              ${senere.join("")}
+            </div>
+          </div>
+          <p class="phint">${rd.size ? `Rester af ${esc(lowerFirst(day.valg.navn))} står på ${[...rd].map((j) => esc(this.days[j].ugedag.toLowerCase())).join(" og ")}.` : "Fryser eller frokost – ingen dag får rester."}</p>` : ""}
       </div>`;
   }
 
@@ -360,13 +498,25 @@ class UgePlan extends HTMLElement {
       </button>`).join("");
   }
 
-  _vaelg(i, valg) {
+  async _vaelg(i, valg) {
     const day = this.days[i];
+    const rd = this._restDage(i);
     day.valg = valg;
     day.laast = true;
     day.aendret = true;
     day.tags = day.tags.filter((t) => t !== "ude");
-    // Er en ret med rester udskiftet, så skal resterne heller ikke stå der
+    day.restFra = null;
+    if (valg?.rest_af) {
+      // Rester valgt fra listen: husk hvilken dag de kommer fra
+      for (let k = i - 1; k >= 0 && k >= i - 4; k--) {
+        if (this._lavesMad(k) && this.days[k].valg.navn.toLowerCase() === valg.rest_af.toLowerCase()) {
+          day.restFra = this.days[k].dato;
+          break;
+        }
+      }
+    }
+    // Er retten skiftet, følger resterne med (eller får nyt bud, hvis der ikke laves mad)
+    await this._kildeSkift(i, rd);
     this._render();
   }
 
@@ -374,12 +524,13 @@ class UgePlan extends HTMLElement {
     const t = (this._sog || "").trim();
     if (!t || this._sheet === null) return;
     const kendt = (this.data.retter || []).find((n) => n.toLowerCase() === t.toLowerCase());
-    this._vaelg(this._sheet, { navn: kendt || t, tekst: lowerFirst(kendt || t), grunde: kendt ? ["Valgt af jer"] : ["Skrevet ind af jer"], varer: [] });
+    const k = this._sheet;
     this._lukSheet();
+    return this._vaelg(k, { navn: kendt || t, tekst: lowerFirst(kendt || t), grunde: kendt ? ["Valgt af jer"] : ["Skrevet ind af jer"], varer: [] });
   }
 
   /* ------------------------------------------------------------ gem */
-  _linje(day, stor) {
+  _linje(day, i) {
     const ugedag = UGEDAGE[ugedagIdx(day.dato)];
     if (day.tags.includes("ude")) return `${ugedag}: ${day.udeTekst || "ude"}`;
     const v = day.valg;
@@ -387,16 +538,16 @@ class UgePlan extends HTMLElement {
     const noter = TAG_ORDEN.filter((t) => day.tags.includes(t)).map((t) => this.data.tags[t]?.note).filter(Boolean);
     const ret = v.rest_af ? `${lowerFirst(v.rest_af)} rest` : v.tekst || lowerFirst(v.navn);
     let s = [...noter, ret].join(" - ");
-    if (!v.rest_af && stor.has(v.navn.toLowerCase())) s += " (stor portion)";
+    if (this._erDobbelt(i)) s += " (stor portion)";
     return `${ugedag}: ${s}`;
   }
 
   async _gem() {
     if (this._busy) return;
-    const stor = this._storDage();
     const linjer = this.days
-      .filter((d) => !(d.eksisterende && !d.aendret))
-      .map((d) => ({ dato: d.dato, linje: this._linje(d, stor) }));
+      .map((d, i) => ({ d, i }))
+      .filter(({ d }) => !(d.eksisterende && !d.aendret))
+      .map(({ d, i }) => ({ dato: d.dato, linje: this._linje(d, i) }));
     if (!linjer.length) return this._luk();
     this._busy = true;
     this._renderBody();
@@ -465,10 +616,12 @@ class UgePlan extends HTMLElement {
       case "tag": {
         const day = this.days[i];
         const t = b.dataset.t;
+        const rd = this._restDage(i);
         day.tags = day.tags.includes(t) ? day.tags.filter((x) => x !== t) : [...day.tags, t];
         if (t === "ude" && day.tags.includes("ude")) {
           day.udeTekst = day.udeTekst || day.kalender[0] || "";
           day.aendret = true;
+          await this._kildeSkift(i, rd);
           return this._renderBody();
         }
         day.aendret = true;
@@ -492,12 +645,16 @@ class UgePlan extends HTMLElement {
         let k = day.idx % day.alts.length;
         for (let n = 0; n < day.alts.length && used.has(day.alts[k].navn.toLowerCase()); n++) k = (k + 1) % day.alts.length;
         const prev = day.valg;
-        day.valg = day.alts[k];
+        const ny = day.alts[k];
         day.alts = day.alts.filter((_, j) => j !== k);
         if (prev && !prev.grunde?.includes("Står allerede i madplanen")) day.alts.push(prev);
         day.idx = k;
-        day.laast = true;
-        day.aendret = true;
+        this._busy = true;
+        try {
+          await this._vaelg(i, ny);
+        } finally {
+          this._busy = false;
+        }
         return this._renderBody();
       }
       case "vaelg":
@@ -510,7 +667,9 @@ class UgePlan extends HTMLElement {
           const valgt = day.alts[k];
           day.alts = day.alts.filter((_, j) => j !== k);
           if (prev && !day.tags.includes("ude")) day.alts.unshift(prev);
-          this._vaelg(this._sheet, valgt);
+          const k2 = this._sheet;
+          this._lukSheet();
+          return this._vaelg(k2, valgt);
         } else {
           day.laast = true;
           day.tags = day.tags.filter((t) => t !== "ude");
@@ -520,12 +679,48 @@ class UgePlan extends HTMLElement {
       }
       case "valg-navn": {
         const navn = b.dataset.navn;
-        const alt = this.days[this._sheet].alts.find((x) => x.navn === navn);
-        this._vaelg(this._sheet, alt || { navn, tekst: lowerFirst(navn), grunde: ["Valgt af jer"], varer: [] });
-        return this._lukSheet();
+        const k2 = this._sheet;
+        const alt = this.days[k2].alts.find((x) => x.navn === navn);
+        this._lukSheet();
+        return this._vaelg(k2, alt || { navn, tekst: lowerFirst(navn), grunde: ["Valgt af jer"], varer: [] });
       }
       case "valg-fri":
         return this._brugSoegning();
+      case "portion":
+      case "rest-dag": {
+        const k = this._sheet;
+        const day = this.days[k];
+        if (!this._lavesMad(k)) return;
+        const rd = this._restDage(k);
+        day.laast = true;
+        day.aendret = true;
+        this._busy = true;
+        try {
+          if (a === "portion" && b.dataset.p === "normal") {
+            day.dobbelt = false;
+            for (const j of rd) await this._fjernRest(j);
+          } else if (a === "portion") {
+            day.dobbelt = true;
+          } else {
+            const j = Number(b.dataset.j);
+            day.dobbelt = true;
+            if (j < 0) {
+              for (const x of rd) await this._fjernRest(x);
+            } else if (rd.includes(j)) {
+              await this._fjernRest(j);
+            } else {
+              const hans = this._lavesMad(j) ? this._restDage(j) : [];
+              this._saetRest(k, j);
+              for (const x of hans) await this._fjernRest(x); // dag j laver ikke mad længere
+            }
+          }
+        } finally {
+          this._busy = false;
+        }
+        this._renderBody();
+        if (this._sheet === k) this._renderSheet();
+        return;
+      }
       case "ude": {
         const k = this._sheet;
         const day = this.days[k];
@@ -536,10 +731,12 @@ class UgePlan extends HTMLElement {
           if (!day.valg) await this._replanDag(k);
           return this._renderBody();
         }
+        const rd = this._restDage(k);
         day.tags = [...day.tags, "ude"];
         day.udeTekst = day.udeTekst || day.kalender[0] || "";
         day.aendret = true;
         this._lukSheet();
+        await this._kildeSkift(k, rd);
         return this._renderBody();
       }
       case "skjul": {
@@ -673,6 +870,19 @@ const CSS = `
   .alt.fri .an { color: var(--im-acc); }
   .flueben { color: var(--im-acc); font-weight: 800; }
   .tom { color: var(--im-dim); padding: 16px 2px; }
+  .portion { flex: none; padding: 8px 0 2px; border-top: 1px solid var(--im-line); margin-top: 4px; }
+  .p-top, .p-rest { display: flex; align-items: center; gap: 10px; }
+  .p-rest { align-items: flex-start; margin-top: 8px; }
+  .pl { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--im-dim); flex: none; width: 58px; padding-top: 8px; }
+  .p-top .pl { padding-top: 0; }
+  .p-top .seg { background: var(--im-bg2); }
+  .p-top .seg button { padding: 7px 16px; font-size: 15px; }
+  .pchips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+  .pc { padding: 6px 10px; border-radius: 999px; font-size: 14px; background: var(--im-bg2); color: var(--im-text); min-height: 36px; }
+  .pc small { font-size: 11.5px; color: var(--im-dim); }
+  .pc[aria-pressed="true"] { background: var(--im-acc); color: #fff; font-weight: 600; }
+  .pc[aria-pressed="true"] small { color: rgba(255,255,255,.85); }
+  .phint { margin: 6px 0 0 68px; font-size: 13px; color: var(--im-dim); }
   .ekstra { flex: none; display: flex; flex-direction: column; gap: 0; padding-top: 6px; }
   .ekstra button { text-align: left; padding: 12px 2px; font-size: 16px; color: var(--im-acc); min-height: 44px; }
   .ekstra .fare { color: var(--error-color, #d93025); font-size: 15px; }

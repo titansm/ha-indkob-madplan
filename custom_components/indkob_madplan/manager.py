@@ -1339,6 +1339,13 @@ class IndkobMadplanManager:
             "tekst": pl.ret_til_madplan(v.navn),
         }
 
+    def _stor_portion(self, d: pl.DagPlan) -> bool:
+        """Står dagen allerede i madplanen med "(stor portion)"? Så viser planlæggeren den som dobbelt."""
+        if not d.eksisterende:
+            return False
+        eks = self.madplan.get(d.dato)
+        return bool(eks and eks.stor_portion)
+
     def _plan_svar(self, model: pl.Model, plan: list[pl.DagPlan], start: date, dage: int, seed: int) -> dict:
         top = sorted(model.profiler.values(), key=lambda p: -p.vaegt)[:5]
         uger = sorted({a.dato.isocalendar()[:2] for a in model.aftener})
@@ -1357,6 +1364,7 @@ class IndkobMadplanManager:
                     "dato": d.dato.isoformat(), "ugedag": UGEDAGE[d.dato.weekday()],
                     "tags": sorted(d.tags), "auto_tags": sorted(d.auto_tags), "kalender": d.kalender,
                     "laast": d.laast, "eksisterende": d.eksisterende, "tekst": d.tekst,
+                    "stor_portion": self._stor_portion(d),
                     "valg": self._valg_dict(model, d.valg),
                     "alternativer": [self._valg_dict(model, a) for a in d.alternativer],
                 }

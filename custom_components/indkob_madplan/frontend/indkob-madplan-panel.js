@@ -2,10 +2,10 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.12.0";
-import "./im-planner.js?v=0.12.0";
-import "./im-retter.js?v=0.12.0";
-import "./im-ugevarer.js?v=0.12.0";
+} from "./im-common.js?v=0.12.2";
+import "./im-planner.js?v=0.12.2";
+import "./im-retter.js?v=0.12.2";
+import "./im-ugevarer.js?v=0.12.2";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
