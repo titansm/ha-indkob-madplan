@@ -66,6 +66,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_retter__liste, ws_retter__hent, ws_retter__gem, ws_retter__paa_listen,
         ws_omregning__hent, ws_omregning__saet, ws_opskrifter__importer,
         ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
+        ws_madplan__kladde__hent, ws_madplan__kladde__gem, ws_madplan__kladde__slet,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -306,6 +307,21 @@ async def ws_madplan_planlaeg(hass: HomeAssistant, connection: websocket_api.Act
 })
 def ws_madplan__indsaet(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.indsaet_uge(msg["linjer"], msg.get("base_version"), user)
+
+
+@_ws({})
+def ws_madplan__kladde__hent(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict | None:
+    return m.kladde_hent()
+
+
+@_ws({vol.Required("kladde"): dict})
+def ws_madplan__kladde__gem(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.kladde_gem(msg["kladde"], user)
+
+
+@_ws({})
+def ws_madplan__kladde__slet(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
+    m.kladde_slet()
 
 
 @_ws({vol.Required("navn"): vol.All(str, vol.Length(min=1, max=120)), vol.Optional("skjul", default=True): bool})

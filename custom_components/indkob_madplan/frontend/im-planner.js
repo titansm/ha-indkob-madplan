@@ -8,8 +8,12 @@
  * resterne står på en bestemt dag (fryser/frokost), eller med rester på én eller flere af de
  * næste dage. Byttes retten på dagen, følger resterne med; vælges "Normal", får rester-dagene
  * et nyt bud.
+ *
+ * Kladde (0.12.3): ugen gemmes løbende i HA (madplan/kladde/gem) – et halvt sekund efter hver
+ * ændring og straks ved luk – og hentes igen, næste gang planlæggeren åbnes (også på en anden
+ * enhed). Kladden slettes, når ugen gemmes i madplanen, eller med "Start forfra".
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.2";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.3";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -34,6 +38,19 @@ const addDays = (iso, n) => {
   d.setDate(d.getDate() + n);
   return d.toISOString().slice(0, 10);
 };
+const idagIso = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const kladdeTid = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const kl = `kl. ${String(d.getHours()).padStart(2, "0")}.${String(d.getMinutes()).padStart(2, "0")}`;
+  const dag = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  if (dag === idagIso()) return `i dag ${kl}`;
+  if (dag === addDays(idagIso(), -1)) return `i går ${kl}`;
+  return `${KORT[(d.getDay() + 6) % 7]} ${d.getDate()}/${d.getMonth() + 1} ${kl}`;
+};
 const periode = (start, dage) => {
   const a = new Date(start + "T12:00:00");
   const b = new Date(addDays(start, dage - 1) + "T12:00:00");
@@ -50,12 +67,32 @@ class UgePlan extends HTMLElement {
     this.opts = { nye: lsGet("plan_nye", 1), rester: lsGet("plan_rester", true) };
     this._busy = false;
     this._sheet = null; // åben dag i bund-arket
+    this._kladde = null; // {tid, af} når en gemt kladde er hentet
+    this._skjult = () => document.visibilityState === "hidden" && this._kladdeNu();
     this.shadowRoot.addEventListener("click", (e) => this._click(e));
     this.shadowRoot.addEventListener("input", (e) => this._input(e));
     this.shadowRoot.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") this._sheet !== null ? this._lukSheet() : this._luk();
       if (e.key === "Enter" && e.target.id === "sog") this._brugSoegning();
     });
+    // Esc på hele siden (PC) – også når fokus ikke står i planlæggeren
+    this._esc = (e) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      this._sheet !== null ? this._lukSheet() : this._luk();
+    };
+  }
+
+  connectedCallback() {
+    document.addEventListener("visibilitychange", this._skjult);
+    window.addEventListener("pagehide", this._skjult);
+    document.addEventListener("keydown", this._esc);
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("visibilitychange", this._skjult);
+    window.removeEventListener("pagehide", this._skjult);
+    document.removeEventListener("keydown", this._esc);
+    this._kladdeNu();
   }
 
   /* ------------------------------------------------------------ åbn/luk */
@@ -66,8 +103,70 @@ class UgePlan extends HTMLElement {
     this.data = null;
     this.days = [];
     this._fejl = null;
+    this._kladde = null;
+    this._gemt = false;
+    this._sidstGemt = null;
     this._render();
     requestAnimationFrame(() => this.shadowRoot.querySelector(".ark")?.classList.add("inde"));
+    let k = null;
+    try {
+      k = await store.send("madplan/kladde/hent", {});
+    } catch (e) {
+      k = null; // ældre backend eller ingen forbindelse: start bare forfra
+    }
+    if (this._brugKladde(k)) return this._render();
+    await this._hent({});
+  }
+
+  /* ------------------------------------------------------------ kladde (0.12.3) */
+  _brugKladde(k) {
+    const kd = k?.kladde;
+    if (!kd) return false;
+    const ok = kd.v === 1 && kd.data?.start && Array.isArray(kd.days) && kd.days.length
+      && addDays(kd.data.start, kd.days.length - 1) >= idagIso();
+    if (!ok) {
+      this.store.send("madplan/kladde/slet", {}).catch(() => {}); // ugen er forbi
+      return false;
+    }
+    this.data = kd.data;
+    this.days = kd.days.map((d) => ({ ...d, visTags: false }));
+    if (kd.opts) this.opts = { nye: kd.opts.nye ?? this.opts.nye, rester: kd.opts.rester ?? this.opts.rester };
+    this._kladde = { tid: k.tid, af: k.af };
+    this._sidstGemt = JSON.stringify({ v: 1, data: this.data, days: this.days, opts: this.opts });
+    return true;
+  }
+
+  /* Gem kladden et øjeblik efter sidste ændring (og aldrig midt i et kald til serveren) */
+  _kladdeSenere() {
+    if (!this.data || this._gemt || this._busy) return;
+    clearTimeout(this._kladdeTimer);
+    this._kladdeTimer = setTimeout(() => this._kladdeNu(), 500);
+  }
+
+  _kladdeNu() {
+    clearTimeout(this._kladdeTimer);
+    this._kladdeTimer = null;
+    if (!this.data || this._gemt || !this.store) return;
+    const json = JSON.stringify({ v: 1, data: this.data, days: this.days, opts: this.opts });
+    if (json === this._sidstGemt) return;
+    this._sidstGemt = json;
+    this.store.send("madplan/kladde/gem", { kladde: JSON.parse(json) }).catch(() => {
+      this._sidstGemt = null; // prøv igen ved næste ændring
+    });
+  }
+
+  async _startForfra() {
+    clearTimeout(this._kladdeTimer);
+    this._kladde = null;
+    this._sidstGemt = null;
+    this.data = null;
+    this.days = [];
+    try {
+      await this.store.send("madplan/kladde/slet", {});
+    } catch (e) {
+      /* ingen kladde at slette */
+    }
+    this._render();
     await this._hent({});
   }
 
@@ -76,6 +175,7 @@ class UgePlan extends HTMLElement {
   }
 
   _luk() {
+    this._kladdeNu(); // et fejlklik må ikke koste ugen
     const ark = this.shadowRoot.querySelector(".ark");
     if (ark) ark.classList.remove("inde");
     setTimeout(() => this.dispatchEvent(new CustomEvent("luk", { bubbles: true, composed: true })), 220);
@@ -311,6 +411,7 @@ class UgePlan extends HTMLElement {
         <p>Nye retter ligner altid noget, I allerede kan lide. Tryk på en ret for flere bud, og vælg "Vis ikke igen" for retter, I er færdige med.</p>
         <p>Portion: tryk på retten og vælg Normal eller Dobbelt. Dobbelt kan være uden en bestemt dag (fryser/frokost) eller med rester på en af de næste dage.</p>
       </details>`;
+    this._kladdeSenere();
     r.getElementById("bund").innerHTML = `
       <button class="sek" data-a="bland" ${this._busy ? "disabled" : ""}>${ICON_SHUFFLE}<span>Bland</span></button>
       <button class="prim" data-a="gem" ${this._busy ? "disabled" : ""}>Gem i madplanen</button>`;
@@ -320,7 +421,11 @@ class UgePlan extends HTMLElement {
     const d = this.data;
     const top = d.grundlag.top.slice(0, 3).map((t) => `${esc(lowerFirst(t.navn))} (${t.antal})`).join(", ");
     const kal = this.state?.indstillinger?.kalendere?.find((k) => k.entity_id === d.kalender);
+    const kl = this._kladde
+      ? `<p class="kladde"><span>Fortsætter kladden fra ${esc(kladdeTid(this._kladde.tid))}${this._kladde.af ? ` (${esc(this._kladde.af)})` : ""}</span><button data-a="forfra" ${this._busy ? "disabled" : ""}>Start forfra</button></p>`
+      : "";
     return `
+      ${kl}
       <div class="intro">
         <p class="grund">Ud fra ${d.grundlag.aftener} aftener i jeres madplan. Mest populært: ${top}.</p>
         <div class="valg">
@@ -548,7 +653,13 @@ class UgePlan extends HTMLElement {
       .map((d, i) => ({ d, i }))
       .filter(({ d }) => !(d.eksisterende && !d.aendret))
       .map(({ d, i }) => ({ dato: d.dato, linje: this._linje(d, i) }));
-    if (!linjer.length) return this._luk();
+    if (!linjer.length) {
+      // Intet nyt at skrive (alt står allerede i madplanen) – kladden er overflødig
+      this._gemt = true;
+      clearTimeout(this._kladdeTimer);
+      this.store.send("madplan/kladde/slet", {}).catch(() => {});
+      return this._luk();
+    }
     this._busy = true;
     this._renderBody();
     try {
@@ -559,6 +670,10 @@ class UgePlan extends HTMLElement {
         await this.store.send("madplan/indsaet", { linjer, base_version: null });
       }
       this._busy = false;
+      // Ugen står nu i madplanen – kladden er brugt
+      this._gemt = true;
+      clearTimeout(this._kladdeTimer);
+      this.store.send("madplan/kladde/slet", {}).catch(() => {});
       // Videre til "Varer til ugen" (panelet åbner arket for de gemte dage)
       this.dispatchEvent(new CustomEvent("toast", { detail: `Uge ${this.data.uge} er gemt i madplanen` }));
       this.dispatchEvent(new CustomEvent("gemt", { detail: { start: this.data.start, dage: this.data.dage } }));
@@ -587,11 +702,14 @@ class UgePlan extends HTMLElement {
     const a = b.dataset.a;
     const li = b.closest(".dag");
     const i = li ? Number(li.dataset.i) : null;
-    if (a === "luk") return this._luk();
+    // Klik på baggrunden (PC) mens forslagsarket er åbent: luk kun arket
+    if (a === "luk") return this._sheet !== null && b.classList.contains("bg") ? this._lukSheet() : this._luk();
     if (a === "luk-sheet") return this._lukSheet();
     if (a === "igen") return this._hent({});
     if (this._busy) return;
     switch (a) {
+      case "forfra":
+        return this._startForfra();
       case "bland":
         return this._bland();
       case "gem":
@@ -762,6 +880,9 @@ const CSS = `
   button:disabled { opacity: .45; cursor: default; }
   button:focus-visible, input:focus-visible { outline: 2px solid var(--im-acc); outline-offset: 2px; }
   .bg { position: absolute; inset: 0; background: rgba(0,0,0,.35); }
+  .kladde { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 10px;
+            padding: 8px 12px; border-radius: 12px; background: var(--im-bg); font-size: 13.5px; color: var(--im-dim); }
+  .kladde button { color: var(--im-acc); font-size: 14px; min-height: 32px; white-space: nowrap; }
   .ark { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--primary-background-color, var(--im-bg2));
          transform: translateY(100%); transition: transform .24s cubic-bezier(.2,.8,.2,1); }
   .ark.inde { transform: none; }

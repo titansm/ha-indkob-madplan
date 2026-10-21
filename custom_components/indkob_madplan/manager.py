@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 import re
 import uuid
@@ -48,6 +50,10 @@ from . import planner as pl
 from .stats import History, clean_names, normalize
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Største kladde fra ugeplanlæggeren (JSON-tegn) – en uge fylder typisk 20–60 KB
+KLADDE_MAX = 400_000
 
 
 class ConflictError(Exception):
@@ -1391,6 +1397,26 @@ class IndkobMadplanManager:
         self.set_madplan(blok + ("\n\n" + gammel if gammel else "") + "\n", base_version, user)
         self._log(user, "madplan", f"planlagde uge {dage[0][0].isocalendar()[1]} med ugeplanlæggeren", key="madplan:plan")
         return {"version": self.madplan_note.version}
+
+    # ------------------------------------------------------------ kladde (0.12.3)
+    def kladde_hent(self) -> dict | None:
+        """Ugeplanlæggerens kladde: den uge der er ved at blive planlagt (fælles for alle)."""
+        return self.planner_data.get("kladde")
+
+    @callback
+    def kladde_gem(self, kladde: dict, user: str | None = None) -> dict:
+        """Gem kladden løbende, så et fejlklik/luk ikke mister ugen. Ingen log og ingen push."""
+        if len(json.dumps(kladde, ensure_ascii=False)) > KLADDE_MAX:
+            raise ValueError("Kladden er for stor")
+        meta = {"tid": dt_util.now().isoformat(timespec="seconds"), "af": user}
+        self.planner_data["kladde"] = {**meta, "kladde": kladde}
+        self._save()
+        return meta
+
+    @callback
+    def kladde_slet(self) -> None:
+        if self.planner_data.pop("kladde", None) is not None:
+            self._save()
 
     @callback
     def skjul_ret(self, navn: str, skjul: bool = True, user: str | None = None) -> list[str]:
