@@ -6,7 +6,7 @@
  * her; de huskes, så retten fremover fylder listen selv. "Tilføj N varer" lægger dem på
  * indkøbslisten med retmærke (retnavnet står med småt under varen).
  */
-import { esc } from "./im-common.js?v=0.12.6";
+import { esc } from "./im-common.js?v=0.13.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -39,6 +39,7 @@ class UgeVarer extends HTMLElement {
     this.state = state;
     this._render();
     requestAnimationFrame(() => this.shadowRoot.querySelector(".ark")?.classList.add("inde"));
+    this._aendret = null;
     await this._hent(start ? { start, dage } : {});
   }
 
@@ -123,6 +124,7 @@ class UgeVarer extends HTMLElement {
     const seg = (d.perioder || []).map((p) =>
       `<button data-a="periode" data-start="${p.start}" data-dage="${p.dage}" aria-pressed="${p.start === d.start && p.dage === d.dage}">${esc(p.titel)}</button>`).join("");
     krop.innerHTML = `
+      ${this._aendret ? `<p class="aendret" role="alert">${esc(this._aendret)}</p>` : ""}
       <div class="seg" role="group" aria-label="Hvilken uge">${seg}</div>
       <h3 class="vh">Ugens retter</h3>
       <div class="dage ${this._busy ? "travl" : ""}">${d.dage_liste.map((x) => this._dagHTML(x)).join("")}</div>
@@ -199,7 +201,7 @@ class UgeVarer extends HTMLElement {
       const grund = v.grund ? `<span class="grund ${frost || kol ? "frost" : ""}">${kol ? "🧊 " : frost ? "❄ " : ""}${esc(v.grund)}</span>` : "";
       return `${head}<button class="vare ${v.paa_listen ? "paa" : ""}" data-a="vare" data-i="${i}" role="checkbox" aria-checked="${on}" ${v.paa_listen ? "disabled" : ""}>
           <span class="chk" aria-hidden="true"></span>
-          <span class="vt"><span class="vn">${esc(v.tekst)}</span><small>${esc(v.retter.join(" · "))}</small></span>
+          <span class="vt"><span class="vn">${esc(v.tekst)}</span><small>${esc(v.retter.join(" · "))}${v.erstatter?.length ? ` · i stedet for ${esc(v.erstatter.join(", ").toLowerCase())}` : ""}</small></span>
           ${grund}
         </button>`;
     }).join("");
@@ -219,6 +221,7 @@ class UgeVarer extends HTMLElement {
       if (this._busy) return;
       this._aaben = null;
       this._valg.clear();
+      this._aendret = null;
       return this._hent({ start: b.dataset.start, dage: Number(b.dataset.dage) });
     }
     if (a === "vare") {
@@ -293,8 +296,10 @@ class UgeVarer extends HTMLElement {
     this._busy = true;
     this._renderBody();
     try {
+      // 0.13.0: arkets version sendes med – er madplanen ændret siden, lægges intet på listen
       const res = await this.store.send("indkob/tilfoej_retter", {
         varer: valgte.map((v) => ({ tekst: v.tekst, retter: v.retter })),
+        madplan_version: this.data.madplan_version,
       });
       const n = res.tilfoejet.length;
       const ids = res.ids || [];
@@ -309,6 +314,13 @@ class UgeVarer extends HTMLElement {
       this._luk();
     } catch (e) {
       this._busy = false;
+      if (e?.code === "conflict") {
+        // Madplanen er ændret, mens arket var åbent: regn varerne ud igen, og lad brugeren se dem først
+        this._valg = new Map();
+        this._aendret = "Madplanen er ændret imens – varerne er regnet ud igen. Tjek dem, og tryk Tilføj igen.";
+        await this._hent({ start: this.data.start, dage: this.data.dage }, { stille: true });
+        return;
+      }
       this._fejlToast(e?.message || "Kunne ikke tilføje varerne");
       this._renderBody();
     }
@@ -377,6 +389,8 @@ const CSS = `
   @keyframes sk { from { background-position: 100% 0; } to { background-position: 0 0; } }
   .fejl { color: var(--error-color, #d93025); font-size: 14px; }
   .fejlboks { padding: 40px 12px; text-align: center; }
+  .aendret { margin: 0 0 10px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 152, 0, .14);
+             color: var(--im-text); font-size: 14px; line-height: 1.4; }
 
   .seg { display: flex; background: var(--im-bg); border-radius: 10px; padding: 2px; }
   .seg button { flex: 1; padding: 7px 9px; border-radius: 8px; font-size: 14px; color: var(--im-dim); min-height: 34px; white-space: nowrap; }

@@ -2,11 +2,11 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.12.6";
-import "./im-planner.js?v=0.12.6";
-import "./im-retter.js?v=0.12.6";
-import "./im-ugevarer.js?v=0.12.6";
-import "./im-koleskab.js?v=0.12.6";
+} from "./im-common.js?v=0.13.0";
+import "./im-planner.js?v=0.13.0";
+import "./im-retter.js?v=0.13.0";
+import "./im-ugevarer.js?v=0.13.0";
+import "./im-koleskab.js?v=0.13.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -150,6 +150,7 @@ class IndkobMadplanPanel extends HTMLElement {
               </form>
               <div class="forslag" id="af"></div>
               <div class="forslag" id="forslag"></div>
+              <div class="synk-fejl" id="synk-fejl" role="alert" hidden></div>
               <div id="cl"></div>
               <button class="ny-linje" data-act="ny-linje">Ny linje</button>
               <div class="butik-fod" id="butik-fod" hidden></div>
@@ -222,14 +223,33 @@ class IndkobMadplanPanel extends HTMLElement {
               </details>
               <div class="konflikt" id="konflikt" hidden>
                 <span id="konflikt-tekst">Madplanen er ændret på en anden enhed.</span>
-                <button class="link" data-act="hent-nyeste">Hent nyeste</button>
+                <span class="kv-valg">
+                  <button class="link" data-act="mp-flet" title="Flet dine ændringer med de andres (linje for linje)">Flet</button>
+                  <button class="link" data-act="mp-behold" title="Gem din tekst – den anden version kan findes under Tidligere versioner">Behold min</button>
+                  <button class="link" data-act="hent-nyeste" title="Vis den nyeste – din tekst gemmes som kopi på denne enhed">Hent nyeste</button>
+                </span>
               </div>
+              <div class="mp-kopi" id="mp-kopi" hidden>
+                <span>Din tekst fra før er gemt som kopi på denne enhed.</span>
+                <button class="link" data-act="mp-kopi-gendan">Gendan</button>
+                <button class="link" data-act="mp-kopi-luk" aria-label="Slet kopien">Slet kopien</button>
+              </div>
+              <details class="overlap" id="mp-overlap" hidden>
+                <summary id="mp-overlap-sum"></summary>
+                <ul id="mp-overlap-liste"></ul>
+                <p class="fod">Teksten ændres ikke af sig selv. Ret eller slet den linje, der er forkert, så tæller den rigtige.</p>
+              </details>
               <textarea id="mp" spellcheck="true" aria-label="Madplan"
                 placeholder="Uge 42&#10;Onsdag: kylling i karry&#10;Torsdag: tit nat - pita"></textarea>
+              <details class="mp-versioner" id="mp-versioner">
+                <summary>🕘 Tidligere versioner</summary>
+                <div id="mp-versioner-liste"><p class="fod">Henter …</p></div>
+              </details>
             </section>
             <section id="v-retter" class="pane">
               <h2 class="titel">Retter</h2>
               <p class="meta">Alle jeres retter – med indkøbsliste, så de kan lægges på listen med ét tryk.</p>
+              <p class="laast" id="retter-laast" role="alert" hidden></p>
               <im-retter id="retter-el"></im-retter>
               <details class="hjaelp">
                 <summary>ⓘ Sådan virker Retter</summary>
@@ -363,11 +383,13 @@ class IndkobMadplanPanel extends HTMLElement {
       plus: true,
       onPlusAdded: plusAdded,
       onFast: (ln) => this._setFast(ln, !ln.fast),
+      onFejl: (f) => this._synkFejl(f),
     });
     this._clb = new Checklist(r.getElementById("cl-basis"), null, {
       editable: true,
       checkbox: false,
       swipe: true,
+      onFejl: (f) => this._synkFejl(f),
       onFocusLine: (id) => { this._focusLine = id; this._focusNote = "basis"; this._updateFastBtn(); },
       scroller: r.getElementById("ark"),
       onDelete: (ln, prevId) => this._deleted(ln, prevId, "basis"),
@@ -420,6 +442,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const caret = () => (this._mpCaret = ta.selectionStart);
     for (const ev of ["keyup", "click", "select", "input"]) ta.addEventListener(ev, caret);
     ta.addEventListener("blur", () => { caret(); this._flushMadplan(); });
+    r.getElementById("mp-versioner").addEventListener("toggle", (e) => e.target.open && this._hentVersioner());
     r.getElementById("insp").addEventListener("toggle", () => this._renderInsp());
     r.getElementById("insp-sog").addEventListener("input", (e) => {
       this._insp.q = e.target.value;
@@ -461,6 +484,9 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderNoteList();
     this._renderIndkob();
     this._renderMadplan();
+    const laast = this.shadowRoot.getElementById("retter-laast");
+    laast.hidden = !s.retter?.laast;
+    laast.textContent = s.retter?.laast ? `⚠ ${s.retter.laast} – intet gemmes i Retter, før den er gendannet fra en backup.` : "";
     if (this._planner) this._planner.hassState = s;
     if (this._ugevarer) this._ugevarer.hassState = s;
     this._tjekUgevarer();
@@ -703,7 +729,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const stops = tur?.butikker || [];
     const varer = (n) => `${n} ${n === 1 ? "vare" : "varer"}`;
     const liste = stops.map((st) => `<button type="button" class="bf-stop" data-act="ba-ret" data-stop="${esc(st.id)}">
-        <span class="bf-ok">✓</span><span class="bf-tx"><b>${esc(st.butik)}</b> · ${varer(st.antal)}</span>
+        <span class="bf-ok">✓</span><span class="bf-tx"><b>${esc(st.butik)}</b> · ${st.antal ? varer(st.antal) : "ingen varer tilbage"}</span>
         <span class="bf-pris${st.beloeb ? "" : " mangler"}">${st.beloeb ? kr(st.beloeb) : "+ pris"}</span></button>`).join("");
     const hint = iKurv
       ? ""
@@ -772,6 +798,9 @@ class IndkobMadplanPanel extends HTMLElement {
       .map((n) => `<button type="button" class="ba-chip" data-act="ba-chip" data-navn="${esc(n)}">${esc(n)}</button>`).join("");
     this._markChip();
     r.getElementById("ba-fortryd").hidden = mode !== "ret";
+    // 0.13.0: butikken og beløbet bliver stående – også uden varer – til den fjernes her
+    r.getElementById("ba-fortryd").textContent = st && !st.antal
+      ? `Fjern butikken – ${st.beloeb ? "beløbet slettes" : "den har ingen varer"}` : "Fortryd – varerne kommer tilbage i kurven";
     r.getElementById("ba-fejl").hidden = true;
     this._renderArkSub();
     this._renderRest();
@@ -1305,13 +1334,100 @@ class IndkobMadplanPanel extends HTMLElement {
     if (!this._mpDirty) {
       if (ta.value !== mp.text) ta.value = mp.text;
       this._mpBase = mp.version;
+      this._mpKonflikt = false;
       r.getElementById("konflikt").hidden = true;
       this._autogrow();
     } else if (mp.version !== this._mpBase && mp.text !== ta.value) {
-      r.getElementById("konflikt-tekst").textContent =
-        `${mp.updated_by || "En anden"} har ændret madplanen imens.`;
-      r.getElementById("konflikt").hidden = false;
+      // 0.13.0: HA sender den nye tilstand FØR svaret på vores egen gemning – er teksten den, vi er
+      // ved at gemme, er det vores egen ændring (ikke en konflikt)
+      if (this._mpGemmer != null && mp.text === this._mpGemmer) this._mpBase = mp.version;
+      else if (!this._mpKonflikt) this._visKonflikt(mp); // vises allerede: behold forklaringen (fx "kan ikke flettes")
     }
+    this._renderOverlap(mp);
+    r.getElementById("mp-kopi").hidden = !lsGet("im-mp-kopi", null);
+  }
+
+  /* 0.13.0: to brugere har ændret madplanen samtidig – intet kasseres uden et valg */
+  _visKonflikt(mp = this._state?.madplan) {
+    const r = this.shadowRoot;
+    this._mpKonflikt = true;
+    r.getElementById("konflikt-tekst").textContent =
+      `${mp?.updated_by || "En anden"} har ændret madplanen imens – din tekst er ikke gemt endnu.`;
+    r.getElementById("konflikt").hidden = false;
+    this._setStatus("Ikke gemt – madplanen er ændret imens");
+  }
+
+  _konfliktLoest(status) {
+    this._mpKonflikt = false;
+    this.shadowRoot.getElementById("konflikt").hidden = true;
+    if (status) this._setStatus(status);
+  }
+
+  /* 0.13.0: dage, der står forskelligt i to uger (kun den ene bruges) – kun en advarsel */
+  _renderOverlap(mp) {
+    const r = this.shadowRoot;
+    const ov = mp.overlap || [];
+    const el = r.getElementById("mp-overlap");
+    el.hidden = !ov.length;
+    if (!ov.length) return;
+    const dag = (iso) => new Date(iso + "T12:00:00").toLocaleDateString("da-DK", { weekday: "short", day: "numeric", month: "numeric" });
+    r.getElementById("mp-overlap-sum").textContent =
+      `⚠ ${ov.length} ${ov.length === 1 ? "dag står" : "dage står"} i to uger – kun den ene tæller`;
+    r.getElementById("mp-overlap-liste").innerHTML = ov.map((o) => `<li>
+        <b>${esc(dag(o.dato))}</b>: tæller «${esc(o.vises.tekst)}» (${esc(o.vises.uge)}) –
+        ikke ${o.skjult.map((x) => `«${esc(x.tekst)}» (${esc(x.uge)})`).join(", ")}
+        <button class="link" data-act="mp-linje" data-linje="${o.skjult[0].linje}">Vis linjen</button></li>`).join("");
+  }
+
+  _markerLinje(idx) {
+    const ta = this.shadowRoot.getElementById("mp");
+    const lines = ta.value.split("\n");
+    if (idx < 0 || idx >= lines.length) return;
+    let pos = 0;
+    for (let i = 0; i < idx; i++) pos += lines[i].length + 1;
+    ta.focus();
+    ta.setSelectionRange(pos, pos + lines[idx].length);
+    this._mpCaret = pos + lines[idx].length;
+    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 22;
+    const ark = this.shadowRoot.getElementById("ark");
+    ark.scrollTop = Math.max(0, ta.offsetTop + idx * lh - ark.clientHeight / 3);
+  }
+
+  async _hentVersioner() {
+    const el = this.shadowRoot.getElementById("mp-versioner-liste");
+    el.innerHTML = `<p class="fod">Henter …</p>`;
+    try {
+      const res = await this._store.send("madplan/versioner", {});
+      this._mpVersioner = new Map(res.versioner.map((v) => [String(v.version), v]));
+      el.innerHTML = res.versioner.length
+        ? `<p class="fod">Madplanen før de seneste ændringer (nyeste først). Gendan gemmer den som en ny version – den nuværende kan også findes her bagefter.</p>
+           <ol class="vl">${res.versioner.map((v) => `<li>
+             <div class="vl-h"><b>${v.t ? esc(relTime(v.t)) : "Tidligere"}</b>${v.af ? ` · ${esc(v.af)}` : ""} <small>v${v.version}</small></div>
+             <details><summary>Vis teksten</summary><pre>${esc(v.tekst)}</pre></details>
+             <button class="link" data-act="mp-gendan" data-v="${v.version}">Gendan denne</button></li>`).join("")}</ol>`
+        : `<p class="fod">Ingen tidligere versioner endnu – de gemmes fra nu af, hver gang madplanen ændres.</p>`;
+    } catch (e) {
+      el.innerHTML = `<p class="fod">Kunne ikke hente versionerne.</p>`;
+    }
+  }
+
+  /* 0.13.0: en ændring på listen blev ikke gemt – vis det, til den er gemt eller lukket */
+  _synkFejl({ tekst, fejl, igen }) {
+    const grund = fejl?.code === "not_found" ? "varen findes ikke længere (slettet på en anden enhed)"
+      : (fejl?.code === 3 || /forbind|connection|lost/i.test(fejl?.message || "")) ? "ingen forbindelse" : (fejl?.message || "ukendt fejl");
+    this._synk = (this._synk || []).filter((x) => x.tekst !== tekst);
+    this._synk.push({ tekst, grund, igen });
+    this._renderSynk();
+  }
+
+  _renderSynk() {
+    const el = this.shadowRoot.getElementById("synk-fejl");
+    const f = this._synk || [];
+    el.hidden = !f.length;
+    if (!f.length) return;
+    const igen = f.some((x) => x.igen);
+    el.innerHTML = `<span class="sf-tx">⚠ <b>Ikke gemt:</b> ${f.slice(-3).map((x) => `${esc(x.tekst)} – ${esc(x.grund)}`).join("<br>")}${f.length > 3 ? `<br>… og ${f.length - 3} mere` : ""}</span>
+      <span class="sf-k">${igen ? `<button class="link" data-act="synk-igen">Prøv igen</button>` : ""}<button class="link" data-act="synk-luk">OK</button></span>`;
   }
 
   /* ------------------------------------------------------------ ugeplanlægger */
@@ -1494,9 +1610,18 @@ class IndkobMadplanPanel extends HTMLElement {
 
   async _flushMadplan() {
     clearTimeout(this._mpTimer);
-    if (!this._mpDirty || !this._store) return;
+    if (!this._mpDirty || !this._store || this._mpKonflikt) return;
+    if (this._mpBase == null) { // 0.13.0: gem aldrig uden at kende madplanens version
+      this._mpTimer = setTimeout(() => this._flushMadplan(), 800);
+      return;
+    }
+    if (this._mpGemmer != null) { // én gemning ad gangen – den næste starter, når denne er færdig
+      this._mpIgen = true;
+      return;
+    }
     const ta = this.shadowRoot.getElementById("mp");
     const text = ta.value;
+    this._mpGemmer = text;
     try {
       const res = await this._store.setMadplan(text, this._mpBase);
       this._mpBase = res.version;
@@ -1504,10 +1629,18 @@ class IndkobMadplanPanel extends HTMLElement {
       this._setStatus("Gemt");
     } catch (e) {
       if (e?.code === "conflict") {
-        this.shadowRoot.getElementById("konflikt").hidden = false;
-        this._setStatus("Ikke gemt");
-      } else this._setStatus("Kunne ikke gemme – prøver igen");
-      if (e?.code !== "conflict") this._mpTimer = setTimeout(() => this._flushMadplan(), 4000);
+        this._visKonflikt();
+        this._setStatus("Ikke gemt – madplanen er ændret imens");
+      } else {
+        this._setStatus("Kunne ikke gemme – prøver igen");
+        this._mpTimer = setTimeout(() => this._flushMadplan(), 4000);
+      }
+    } finally {
+      this._mpGemmer = null;
+      if (this._mpIgen) {
+        this._mpIgen = false;
+        if (this._mpDirty && !this._mpKonflikt) this._flushMadplan();
+      }
     }
   }
 
@@ -1522,7 +1655,11 @@ class IndkobMadplanPanel extends HTMLElement {
     const el = this.shadowRoot.getElementById("status");
     el.textContent = t;
     clearTimeout(this._statusTimer);
-    if (t !== "Gemmer …") this._statusTimer = setTimeout(() => (el.textContent = ""), 1500);
+    // 0.13.0: fejl bliver stående (til næste besked) – kun almindelige beskeder forsvinder
+    const fejl = /^(Kunne ikke|Ikke gemt)/.test(t);
+    el.classList.toggle("fejl", fejl);
+    el.title = fejl ? t : "";
+    if (t !== "Gemmer …" && !fejl) this._statusTimer = setTimeout(() => (el.textContent = ""), 1500);
   }
 
   /* ------------------------------------------------------------ klik */
@@ -1646,7 +1783,28 @@ class IndkobMadplanPanel extends HTMLElement {
       this._renderMadplan();
     } else if (act === "ny-uge") {
       const ta = r.getElementById("mp");
-      const tpl = nyUgeSkabelon(new Date(), this._state?.madplan.sidste_dato || null);
+      const nu = this._state?.madplan?.ny_uge;
+      if (nu && nu.linje != null && !this._mpDirty) {
+        // 0.13.0: ugen står allerede klar (fx Mettes tomme skabelon) – gå til den i stedet for en ny blok
+        const lines = ta.value.split("\n");
+        if (nu.linje < lines.length) {
+          let pos = 0;
+          for (let i = 0; i < nu.linje; i++) pos += lines[i].length + 1;
+          this._markerLinje(nu.linje);
+          const slut = pos + lines[nu.linje].length;
+          ta.setSelectionRange(slut, slut);
+          this._mpCaret = slut;
+          this._toast(`Uge ${nu.uge} står allerede klar i madplanen – skriv retterne`, { ms: 3500 });
+          return;
+        }
+      }
+      let foer = this._state?.madplan.sidste_dato || null;
+      if (nu?.start) {
+        const d = new Date(nu.start + "T12:00:00");
+        d.setDate(d.getDate() - 1);
+        foer = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      }
+      const tpl = nyUgeSkabelon(new Date(), foer);
       ta.value = tpl + (ta.value.trim() ? "\n\n" + ta.value : "");
       ta.dispatchEvent(new Event("input"));
       ta.focus();
@@ -1742,8 +1900,78 @@ class IndkobMadplanPanel extends HTMLElement {
         this._setStatus("Kunne ikke nulstille");
       }
     } else if (act === "hent-nyeste") {
+      // 0.13.0: din tekst kasseres ikke – den gemmes som kopi på denne enhed
+      const ta = r.getElementById("mp");
+      lsSet("im-mp-kopi", { tekst: ta.value, t: new Date().toISOString() });
       this._mpDirty = false;
+      this._konfliktLoest("Nyeste hentet – din tekst er gemt som kopi");
       this._renderMadplan();
+    } else if (act === "mp-flet") {
+      const ta = r.getElementById("mp");
+      const text = ta.value;
+      try {
+        const res = await this._store.send("madplan/set", { text, base_version: this._mpBase, flet: true });
+        this._mpBase = res.version;
+        if (res.text != null && ta.value === text) ta.value = res.text;
+        if (ta.value === (res.text ?? text)) this._mpDirty = false;
+        this._autogrow();
+        this._konfliktLoest(res.flettet ? "Flettet – begges ændringer er gemt" : "Gemt");
+        this._renderMadplan();
+      } catch (err) {
+        if (err?.code === "flet_konflikt") {
+          r.getElementById("konflikt-tekst").textContent =
+            `Kan ikke flettes: samme linjer er ændret begge steder. Vælg Behold min eller Hent nyeste.`;
+        } else this._setStatus("Kunne ikke flette");
+      }
+    } else if (act === "mp-behold") {
+      const ta = r.getElementById("mp");
+      const text = ta.value;
+      try {
+        const res = await this._store.setMadplan(text, this._state?.madplan?.version);
+        this._mpBase = res.version;
+        if (ta.value === text) this._mpDirty = false;
+        this._konfliktLoest("Gemt – den anden version ligger under Tidligere versioner");
+      } catch (err) {
+        this._setStatus("Kunne ikke gemme");
+      }
+    } else if (act === "mp-kopi-gendan") {
+      const k = lsGet("im-mp-kopi", null);
+      if (!k?.tekst) return;
+      if (!confirm("Sæt din gemte kopi ind i madplanen i stedet for den nuværende tekst?\n\nDen nuværende kan findes under Tidligere versioner.")) return;
+      const ta = r.getElementById("mp");
+      ta.value = k.tekst;
+      lsSet("im-mp-kopi", null);
+      ta.dispatchEvent(new Event("input"));
+      this._renderMadplan();
+    } else if (act === "mp-kopi-luk") {
+      lsSet("im-mp-kopi", null);
+      r.getElementById("mp-kopi").hidden = true;
+    } else if (act === "mp-linje") {
+      this._markerLinje(Number(b.dataset.linje));
+    } else if (act === "mp-gendan") {
+      const v = this._mpVersioner?.get(b.dataset.v);
+      if (!v) return;
+      if (!confirm(`Gendan madplanen, som den var ${v.t ? relTime(v.t) : "før"}${v.af ? " (" + v.af + ")" : ""}?\n\nDen nuværende tekst gemmes også som version.`)) return;
+      try {
+        await this._flushMadplan();
+        const res = await this._store.setMadplan(v.tekst, this._state?.madplan?.version);
+        this._mpBase = res.version;
+        this._mpDirty = false;
+        r.getElementById("mp").value = v.tekst;
+        this._autogrow();
+        this._setStatus("Madplanen er gendannet");
+        this._hentVersioner();
+      } catch (err) {
+        this._setStatus("Kunne ikke gendanne");
+      }
+    } else if (act === "synk-igen") {
+      const f = this._synk || [];
+      this._synk = [];
+      this._renderSynk();
+      for (const x of f) x.igen?.();
+    } else if (act === "synk-luk") {
+      this._synk = [];
+      this._renderSynk();
     }
   }
 }
@@ -1917,6 +2145,30 @@ const PANEL_CSS = `
         color: var(--im-text); font: inherit; font-size: 17px; line-height: 1.55; padding: 0; overflow: hidden; }
   .konflikt { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 10px;
               border-radius: 10px; background: color-mix(in srgb, var(--im-acc-strong) 18%, transparent); }
+  .konflikt .kv-valg { display: flex; gap: 14px; flex-wrap: wrap; }
+  .konflikt .link, .mp-kopi .link, .synk-fejl .link { min-height: 36px; font-weight: 600; }
+  .mp-kopi, .synk-fejl { display: flex; gap: 8px 14px; align-items: center; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 10px;
+                         border-radius: 10px; font-size: 14px; background: color-mix(in srgb, var(--im-text) 7%, transparent); }
+  .mp-kopi[hidden], .synk-fejl[hidden], .konflikt[hidden] { display: none; }
+  .synk-fejl { position: sticky; top: 0; z-index: 3; background: color-mix(in srgb, #ff9800 22%, var(--im-bg2, var(--card-background-color, #fff)));
+               color: var(--im-text); }
+  .synk-fejl .sf-tx { flex: 1 1 200px; line-height: 1.35; }
+  .synk-fejl .sf-k { display: flex; gap: 14px; }
+  .overlap { margin: 0 0 10px; padding: 6px 12px; border-radius: 10px; font-size: 14px;
+             background: color-mix(in srgb, #ff9800 12%, transparent); }
+  .overlap summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-weight: 600; }
+  .overlap ul { margin: 6px 0; padding-left: 18px; line-height: 1.45; }
+  .overlap li { margin: 4px 0; }
+  .mp-versioner { margin-top: 12px; font-size: 14px; }
+  .mp-versioner summary { cursor: pointer; min-height: 36px; display: flex; align-items: center; color: var(--im-dim); }
+  .mp-versioner .vl { list-style: none; margin: 0; padding: 0; }
+  .mp-versioner .vl li { padding: 8px 0; border-top: 1px solid var(--im-line, rgba(127,127,127,.2)); }
+  .mp-versioner .vl-h small { color: var(--im-dim); }
+  .mp-versioner pre { white-space: pre-wrap; max-height: 240px; overflow: auto; font: inherit; font-size: 13px; margin: 6px 0;
+                      padding: 8px; border-radius: 8px; background: color-mix(in srgb, var(--im-text) 6%, transparent); }
+  .laast { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, #f44336 16%, transparent);
+           font-size: 14px; }
+  .status.fejl { color: var(--error-color, #db4437); max-width: 55%; }
   .pad { padding: 24px; }
 
   .hjaelp { margin-top: 28px; padding: 12px 16px; background: var(--im-bg2); border-radius: 14px; font-size: 15px; line-height: 1.45; }

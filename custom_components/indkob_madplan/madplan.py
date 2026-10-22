@@ -182,6 +182,160 @@ def parse_madplan(text: str, today: date) -> dict[date, Dag]:
     return result
 
 
+@dataclass
+class Linje:
+    """En dag-linje i madplan-teksten (0.13.0): hvor den står, og hvilken dato den gælder."""
+
+    idx: int  # linjenummer i teksten (0-baseret, som text.splitlines())
+    blok: int  # blokkens nummer i teksten (0 = øverst)
+    overskrift: str  # blokkens "Uge NN"-linje
+    dag: Dag
+
+
+def scan_linjer(text: str, today: date) -> list[Linje]:
+    """Alle dag-linjer med linjenummer og blok – samme regler som parse_madplan (0.13.0)."""
+    ud: list[Linje] = []
+    week: int | None = None
+    prev: date | None = None
+    blok = -1
+    overskrift = ""
+    for i, raw_line in enumerate((text or "").splitlines()):
+        line = _clean_line(raw_line)
+        if not line:
+            continue
+        m = _WEEK_RE.match(line)
+        if m:
+            week = int(m.group(1))
+            prev = None
+            blok += 1
+            overskrift = line
+            continue
+        m = _DAY_RE.match(line)
+        if not m or week is None or blok < 0:
+            continue
+        wd = _DAY_ALIASES[m.group(1).lower()]
+        entry = m.group(2).strip()
+        if prev is None:
+            d = _first_date(week, wd, today)
+            if d is None:
+                continue
+        else:
+            delta = (wd - prev.weekday()) % 7 or 7
+            d = prev + timedelta(days=delta)
+        prev = d
+        fv = _FRYSER_VALG_RE.search(entry)
+        ret, noter, stor = _split_entry(_FRYSER_VALG_RE.sub(" ", entry) if fv else entry)
+        ud.append(Linje(i, blok, overskrift, Dag(dato=d, raw=entry, ret=ret, noter=noter, stor_portion=stor, uge=week,
+                                                fryser_valg=(fv.group(1).strip() or None) if fv else None)))
+    return ud
+
+
+def vindere(linjer: list[Linje]) -> dict[date, Linje]:
+    """Den linje, parse_madplan bruger for hver dato (samme regel: senest startende blok vinder,
+    tomme dage overskriver ikke; ved samme startdato vinder den nederste)."""
+    blokke: dict[int, list[Linje]] = {}
+    for ln in linjer:
+        blokke.setdefault(ln.blok, []).append(ln)
+    orden = sorted(blokke.values(), key=lambda b: b[0].dag.dato)
+    res: dict[date, Linje] = {}
+    for b in orden:
+        for ln in b:
+            if ln.dag.ret or ln.dag.dato not in res:
+                res[ln.dag.dato] = ln
+    return res
+
+
+def overlap(text: str, today: date) -> list[dict]:
+    """Datoer, der står forskelligt i to eller flere uger (0.13.0, kun til advarsel):
+    kun den ene linje bruges – de andre tæller ingen steder. Teksten ændres ikke."""
+    linjer = scan_linjer(text, today)
+    vind = vindere(linjer)
+    pr_dato: dict[date, list[Linje]] = {}
+    for ln in linjer:
+        if ln.dag.raw.strip():
+            pr_dato.setdefault(ln.dag.dato, []).append(ln)
+    ud = []
+    for d in sorted(pr_dato, reverse=True):
+        v = vind.get(d)
+        skjulte = [ln for ln in pr_dato[d] if v is None or (ln.idx != v.idx and ln.dag.raw.strip() != v.dag.raw.strip())]
+        if not skjulte or v is None:
+            continue
+        ud.append({
+            "dato": d.isoformat(), "ugedag": UGEDAGE[d.weekday()],
+            "vises": {"tekst": v.dag.raw.strip(), "uge": v.overskrift, "linje": v.idx},
+            "skjult": [{"tekst": ln.dag.raw.strip(), "uge": ln.overskrift, "linje": ln.idx} for ln in skjulte],
+        })
+    return ud
+
+
+def flet3(base: str, mine: str, deres: str) -> tuple[str | None, list[str]]:
+    """Trevejsfletning linje for linje (0.13.0): ændringer på forskellige linjer flettes;
+    er samme linjer ændret forskelligt begge steder, returneres (None, [konfliktlinjer])."""
+    from difflib import SequenceMatcher
+
+    b, m, t = base.split("\n"), mine.split("\n"), deres.split("\n")
+
+    def hunks(ny: list[str]) -> list[tuple[int, int, list[str]]]:
+        return [(i1, i2, ny[j1:j2]) for tag, i1, i2, j1, j2 in SequenceMatcher(None, b, ny, autojunk=False).get_opcodes()
+                if tag != "equal"]
+
+    alle = sorted([(h, 0) for h in hunks(m)] + [(h, 1) for h in hunks(t)], key=lambda x: (x[0][0], x[0][1]))
+
+    def overlapper(a: tuple, c: tuple) -> bool:
+        a1, a2, c1, c2 = a[0], a[1], c[0], c[1]
+        if a1 == a2 and c1 == c2:
+            return a1 == c1
+        if a1 == a2:
+            return c1 < a1 < c2
+        if c1 == c2:
+            return a1 < c1 < a2
+        return a1 < c2 and c1 < a2
+
+    grupper: list[list[tuple]] = []
+    for h in alle:
+        if grupper and any(overlapper(h[0], g[0]) for g in grupper[-1]):
+            grupper[-1].append(h)
+        else:
+            grupper.append([h])
+    ud: list[str] = []
+    pos = 0
+    konflikter: list[str] = []
+    for g in grupper:
+        lo = min(h[0][0] for h in g)
+        hi = max(h[0][1] for h in g)
+        ud.extend(b[pos:lo])
+        sider = {h[1] for h in g}
+        if len(sider) == 1:
+            # kun den ene side har ændret her
+            cur = lo
+            for (i1, i2, ny), _s in sorted(g, key=lambda x: x[0][0]):
+                ud.extend(b[cur:i1])
+                ud.extend(ny)
+                cur = i2
+            ud.extend(b[cur:hi])
+        else:
+            def version(side: int) -> list[str]:
+                res, cur = [], lo
+                for (i1, i2, ny), s in sorted(g, key=lambda x: x[0][0]):
+                    if s != side:
+                        continue
+                    res.extend(b[cur:i1])
+                    res.extend(ny)
+                    cur = i2
+                res.extend(b[cur:hi])
+                return res
+            vm, vt = version(0), version(1)
+            if vm == vt:
+                ud.extend(vm)
+            else:
+                konflikter.extend([x for x in (vm + vt) if x.strip()][:6] or ["(tomme linjer)"])
+        pos = hi
+    ud.extend(b[pos:])
+    if konflikter:
+        return None, konflikter
+    return "\n".join(ud), []
+
+
 _DISH_STRIP_RE = re.compile(
     r"\(\s*❄[^()]*\)|\(?\s*(husk\s+)?(stor|dobbelt)\s+portion\s*\)?|\bx\s*2\b|\(\s*\)|\?+$", re.IGNORECASE
 )

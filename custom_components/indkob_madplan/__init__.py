@@ -40,7 +40,7 @@ from .const import (
     URL_BASE,
     VERSION,
 )
-from .manager import ConflictError, IndkobMadplanManager
+from .manager import ConflictError, FletKonflikt, IndkobMadplanManager
 from .notes import LINE_TYPES, TYPE_ITEM
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,6 +68,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
         ws_madplan__kladde__hent, ws_madplan__kladde__gem, ws_madplan__kladde__slet,
         ws_koleskab__tilfoej, ws_koleskab__saet, ws_koleskab__fjern,
+        ws_madplan__versioner,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -144,6 +145,9 @@ def _ws(schema: dict):
                 return
             except ValueError as err:
                 connection.send_error(msg["id"], "invalid", str(err))
+                return
+            except FletKonflikt as err:  # 0.13.0: samme linjer ændret begge steder
+                connection.send_error(msg["id"], "flet_konflikt", str(err))
                 return
             except ConflictError:
                 connection.send_error(msg["id"], "conflict", "Madplanen er ændret af en anden")
@@ -261,10 +265,21 @@ def ws_indkob__uncheck_all(m: IndkobMadplanManager, msg: dict, user: str | None)
     return {"trip_id": m.last_finished_trip}
 
 
-@_ws({vol.Required("text"): vol.All(str, vol.Length(max=200000)), vol.Optional("base_version"): vol.Any(int, None)})
+@_ws({
+    vol.Required("text"): vol.All(str, vol.Length(max=200000)),
+    vol.Optional("base_version"): vol.Any(int, None),
+    vol.Optional("flet", default=False): bool,  # 0.13.0: flet med ændringer gjort imens (linje for linje)
+})
 def ws_madplan__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    m.set_madplan(msg["text"], msg.get("base_version"), user)
-    return {"version": m.madplan_note.version}
+    # 0.13.0: uden version afvises skrivningen (så hele madplanen aldrig overskrives i blinde);
+    # tjenesten indkob_madplan.importer er stadig en bevidst import uden version.
+    return m.set_madplan(msg["text"], msg.get("base_version"), user, kraev_version=True, flet=msg["flet"])
+
+
+@_ws({})
+def ws_madplan__versioner(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    """0.13.0: tidligere versioner af madplanen (til "Tidligere versioner" og gendannelse)."""
+    return m.madplan_versioner()
 
 
 @_ws({})
@@ -307,7 +322,7 @@ async def ws_madplan_planlaeg(hass: HomeAssistant, connection: websocket_api.Act
     vol.Optional("base_version"): vol.Any(int, None),
 })
 def ws_madplan__indsaet(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    return m.indsaet_uge(msg["linjer"], msg.get("base_version"), user)
+    return m.indsaet_uge(msg["linjer"], msg.get("base_version"), user, kraev_version=True)
 
 
 @_ws({})
@@ -417,9 +432,11 @@ def ws_madplan__varer(m: IndkobMadplanManager, msg: dict, user: str | None) -> d
 @_ws({vol.Required("varer"): vol.All([{
     vol.Required("tekst"): vol.All(str, vol.Length(min=1, max=200)),
     vol.Optional("retter", default=list): [vol.All(str, vol.Length(max=120))],
-}], vol.Length(max=120))})
+}], vol.Length(max=120)),
+    vol.Optional("madplan_version"): vol.Any(int, None),  # 0.13.0: arkets version – forældet = afvist
+})
 def ws_indkob__tilfoej_retter(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    return m.tilfoej_til_retter(msg["varer"], user)
+    return m.tilfoej_til_retter(msg["varer"], user, madplan_version=msg.get("madplan_version"))
 
 
 @_ws({vol.Required("navn"): vol.All(str, vol.Length(min=1, max=200))})

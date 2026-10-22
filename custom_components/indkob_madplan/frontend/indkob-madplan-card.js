@@ -7,7 +7,7 @@
  *           vis_i_morgen (false) – med kun_i_dag: også morgendagens ret
  *           (fra kl. 18 viser den kompakte række morgendagens ret – "I morgen")
  */
-import * as C from "./im-common.js?v=0.12.6";
+import * as C from "./im-common.js?v=0.13.0";
 
 // Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
 C.resumeIfShopping();

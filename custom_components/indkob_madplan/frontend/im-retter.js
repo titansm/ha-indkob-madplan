@@ -7,7 +7,7 @@
  * Elementerne har ingen egen shadow-root: de tegnes inde i panelets, så panelets typografi og
  * Indstillinger-kortene (.kort/.felt) gælder. Derfor bruges ingen data-act/data-set/data-note her.
  */
-import { esc, lsGet, lsSet } from "./im-common.js?v=0.12.6";
+import { esc, lsGet, lsSet } from "./im-common.js?v=0.13.0";
 
 const ENHEDER = ["", "g", "kg", "ml", "dl", "l", "stk", "tsk", "spsk", "fed", "dåse", "pakke", "bundt", "glas", "flaske", "knivspids"];
 const MDR = ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "dec."];

@@ -43,8 +43,8 @@ from .const import (
     VERSION,
 )
 from .madplan import (
-    _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, parse_madplan,
-    retter,
+    _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, flet3, overlap,
+    parse_madplan, retter, scan_linjer, vindere,
 )
 from .notes import TYPE_ITEM, ShoppingNote, TextNote, new_id
 from . import kategorier as kat
@@ -65,6 +65,20 @@ KOLESKAB_MAX = 40
 
 class ConflictError(Exception):
     """Madplanen er ændret af en anden siden klienten hentede den."""
+
+
+class FletKonflikt(ConflictError):
+    """0.13.0: madplanen kunne ikke flettes – samme linjer er ændret begge steder."""
+
+    def __init__(self, linjer: list[str]) -> None:
+        super().__init__("Samme linjer er ændret begge steder: " + " · ".join(linjer[:4]))
+        self.linjer = linjer
+
+
+# 0.13.0: så mange tidligere versioner af madplanen gemmes (til fletning og "Tidligere versioner")
+MADPLAN_REVISIONER = 30
+# Tegn der får str.splitlines() til at dele anderledes end "\n" – så indsættes ugen som ny blok
+_ANDRE_LINJESKIFT = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 
 
 def _split_words(value: str | None) -> list[str]:
@@ -193,11 +207,20 @@ class IndkobMadplanManager:
         self.log = data.get("log", [])
         self.planner_data = {"skjulte": [], **(data.get("planner") or {})}
         self.koleskab = [x for x in (data.get("koleskab") or []) if isinstance(x, dict) and x.get("id") and x.get("navn")]
+        self.madplan_revisioner = [x for x in (data.get("madplan_revisioner") or [])
+                                   if isinstance(x, dict) and isinstance(x.get("version"), int)][-MADPLAN_REVISIONER:]
+        self._bank_laast = None
         try:
-            self.bank = op.Opskriftsbank(await self.bank_store.async_load())
+            raa = await self.bank_store.async_load()
+            self.bank = op.Opskriftsbank(raa)
+            if raa is None and (data.get("bank_antal") or 0) > 0:
+                # Banken fandtes, men kunne ikke læses (HA flytter selv en ødelagt fil til *.corrupt.*)
+                self._bank_laast = (f"Opskriftsbanken kunne ikke læses ({data['bank_antal']} retter forventet)")
+                _LOGGER.error("%s – der gemmes intet i den, før den er gendannet", self._bank_laast)
         except Exception:  # noqa: BLE001
-            _LOGGER.exception("Kunne ikke læse opskriftsbanken – starter tom")
+            _LOGGER.exception("Kunne ikke læse opskriftsbanken – starter tom og gemmer intet i den")
             self.bank = op.Opskriftsbank()
+            self._bank_laast = "Opskriftsbanken kunne ikke læses"
         if self.indkob.sanitize():
             _LOGGER.info("Indkøbslisten ryddet op (tomme linjer med flueben)")
         if data.get(NOTE_BASIS) is None:
@@ -246,12 +269,28 @@ class IndkobMadplanManager:
             "log": self.log,
             "planner": self.planner_data,
             "koleskab": self.koleskab,
+            # 0.13.0: tidligere versioner af madplanen + hvor mange retter banken havde (læsefejl-vagt)
+            "madplan_revisioner": self._revisioner(),
+            "bank_antal": self._bank_antal(),
         }
 
     def _save(self) -> None:
         self.store.async_delay_save(self._data, 2)
 
+    def _bank_antal(self) -> int:
+        if getattr(self, "_bank_laast", None):
+            return getattr(self, "_bank_antal_sidst", 0)
+        n = len(self.bank.raa) + len(self.bank.egne)
+        self._bank_antal_sidst = n
+        return n
+
+    def _tjek_bank(self) -> None:
+        """0.13.0: en opskriftsbank, der ikke kunne læses, må aldrig overskrives."""
+        if laast := getattr(self, "_bank_laast", None):
+            raise ValueError(f"{laast} – intet gemmes, før den er gendannet fra en backup")
+
     def _save_bank(self) -> None:
+        self._tjek_bank()
         self._bank_dirty = True
         self.bank_store.async_delay_save(self.bank.as_dict, 2)
 
@@ -419,24 +458,26 @@ class IndkobMadplanManager:
         self._checked_count = checked
         if self._stops():
             # Mindst én butik er afsluttet med knappen: turen annulleres ikke.
-            # Varer, der får fjernet fluebenet, hører ikke længere til butikken.
+            # 0.13.0: butikken og dens beløb bliver altid stående (fjernes kun med "Fortryd" i butikkens
+            # ark). Varer, der får fjernet fluebenet, hører ikke længere til butikken; varer, der er
+            # SLETTET fra listen (fx "Slet afkrydsede"), er stadig købt og bliver i butikkens varer.
+            alle = {ln["id"]: ln for ln in self.indkob.lines}
             checked_lines = {ln["id"]: ln["text"] for ln in self.indkob.items() if ln["checked"]}
-            for st in list(self._stops()):
+            for st in self._stops():
                 keep = [i for i in st["line_ids"] if i in checked_lines]
                 if len(keep) == len(st["line_ids"]):
                     continue
-                if not keep:
-                    # Alle varer fra butikken fik fluebenet fjernet igen: butikken (og dens pris) udgår
-                    _LOGGER.debug("Butikken %s har ingen varer tilbage – fjernes fra turen", st["butik"])
-                    self.undo_store(st["id"], "Automatisk", _notify=False)
-                    continue
+                ikke_koebt = [alle[i]["text"] for i in st["line_ids"] if i in alle and i not in checked_lines]
+                st["slettet"] = st.get("slettet", 0) + sum(1 for i in st["line_ids"] if i not in alle)
                 st["line_ids"] = keep
-                if b := self._stop_payment(st["id"]):
-                    b["varer"] = clean_names([checked_lines[i] for i in keep])
+                if ikke_koebt and (b := self._stop_payment(st["id"])):
+                    varer = list(b.get("varer") or [])
+                    for navn in clean_names(ikke_koebt):
+                        if navn in varer:
+                            varer.remove(navn)
+                    b["varer"] = varer
                     tr = self._hist_trip()
                     tr["varer"] = [n for x in tr["betalinger"] for n in x.get("varer", [])]
-            if not self._stops():
-                return self._track_trip()  # ingen butikker tilbage: tærsklen gælder igen
             if more:
                 self.trip["sidste_flueben"] = now
             return
@@ -773,23 +814,90 @@ class IndkobMadplanManager:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Fejl ved læsning af madplanen")
             self.madplan = {}
+        try:
+            self._overlap = overlap(self.madplan_note.text, dt_util.now().date())
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Fejl ved tjek af overlappende uger")
+            self._overlap = []
+
+    # ------------------------------------------------------------ madplanens versioner (0.13.0)
+    def _revisioner(self) -> list[dict]:
+        if not hasattr(self, "madplan_revisioner"):
+            self.madplan_revisioner = []
+        return self.madplan_revisioner
+
+    def _madplan_tekst(self, version: int | None) -> str | None:
+        """Madplanens tekst, som den var i en bestemt version (None = ukendt/for gammel)."""
+        n = self.madplan_note
+        if version == n.version:
+            return n.text
+        return next((r["text"] for r in reversed(self._revisioner()) if r.get("version") == version), None)
+
+    def madplan_versioner(self) -> dict:
+        """Tidligere versioner af madplanen (nyeste først) – til sammenligning og gendannelse."""
+        n = self.madplan_note
+        return {
+            "version": n.version,
+            "versioner": [{"version": r["version"], "t": r.get("t"), "af": r.get("af"), "tekst": r.get("text", "")}
+                          for r in reversed(self._revisioner())],
+        }
 
     @callback
-    def set_madplan(self, text: str, base_version: int | None = None, user: str | None = None) -> None:
+    def set_madplan(self, text: str, base_version: int | None = None, user: str | None = None, *,
+                    kraev_version: bool = False, flet: bool = False) -> dict:
+        """Gem madplanens tekst.
+
+        0.13.0: `kraev_version` (websocket) afviser skrivning uden version; en forældet version
+        afvises – eller flettes linje for linje med `flet` (FletKonflikt, hvis samme linjer er ændret
+        begge steder). Den forrige tekst gemmes altid som version (MADPLAN_REVISIONER).
+        """
         n = self.madplan_note
-        if base_version is not None and base_version != n.version and text != n.text:
-            raise ConflictError
+        flettet = False
         if text == n.text:
-            return
+            return {"version": n.version, "flettet": False}
+        if base_version is None:
+            if kraev_version:
+                raise ConflictError
+        elif base_version != n.version:
+            if not flet:
+                raise ConflictError
+            base = self._madplan_tekst(base_version)
+            if base is None:
+                raise FletKonflikt(["(versionen er for gammel til at flette)"])
+            merged, konflikter = flet3(base, text, n.text)
+            if merged is None:
+                raise FletKonflikt(konflikter)
+            if merged == n.text:
+                return {"version": n.version, "flettet": True, "text": n.text}
+            text, flettet = merged, True
+        rev = self._revisioner()
+        rev.append({"version": n.version, "text": n.text, "t": n.updated, "af": n.updated_by})
+        del rev[:-MADPLAN_REVISIONER]
         n.text = text
         n.version += 1
         n.updated = dt_util.now().isoformat(timespec="seconds")
         n.updated_by = user
-        self._log(user, "madplan", "importerede madplanen" if user == "Import" else "ændrede madplanen",
+        self._log(user, "madplan", "importerede madplanen" if user == "Import" else (
+            "flettede sine ændringer ind i madplanen" if flettet else "ændrede madplanen"),
                   key="madplan", window=900)
         self._parse_madplan()
         self._save()
         self._notify()
+        return {"version": n.version, "flettet": flettet, **({"text": n.text} if flettet else {})}
+
+    def ny_uge(self) -> dict:
+        """0.13.0 "Ny uge": dagen efter den sidste dag med tekst (ikke tomme skabelon-dage), aldrig før i dag.
+        Står der allerede (tomme) linjer for den dag, peger `linje` på dem i stedet for en ny blok."""
+        today = dt_util.now().date()
+        udfyldt = [d for d, dag in self.madplan.items() if (dag.raw or "").strip()]
+        start = max(today, max(udfyldt) + timedelta(days=1)) if udfyldt else today
+        linje = None
+        try:
+            v = vindere(scan_linjer(self.madplan_note.text, today)).get(start)
+            linje = v.idx if v and not v.dag.raw.strip() else None
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Ny uge: kunne ikke læse madplanen")
+        return {"start": start.isoformat(), "uge": start.isocalendar()[1], "linje": linje}
 
     def dag(self, offset: int) -> dict | None:
         d = dt_util.now().date() + timedelta(days=offset)
@@ -1026,6 +1134,7 @@ class IndkobMadplanManager:
                 varer: list[dict] | None | bool = False, opskrift: str | None | bool = False,
                 fryser: list[str] | None | bool = False, saeson: list[str] | None | bool = False) -> dict:
         """Gem jeres indkøbsliste til en ret (eller koblingen til en opskrift). ret_id None = ny egen ret."""
+        self._tjek_bank()
         if ret_id is None:
             navn = (navn or "").strip()
             if not navn:
@@ -1197,6 +1306,10 @@ class IndkobMadplanManager:
                 ]
                 ud_dage.append(item)
                 continue
+            # 0.13.0: kødet valgt i madplanen ("burger (❄ kyllingebryst)" / "(❄ intet)") bruges her:
+            # intet = opskriftens kød købes; et navngivet kød erstatter opskriftens fryserkød (fra fryseren)
+            fv = ((dag.fryser_valg if dag else None) or "").strip().lower()
+            erstattet = False
             for v in liste:
                 navn_v = v["navn"].strip()
                 if not navn_v:
@@ -1205,8 +1318,19 @@ class IndkobMadplanManager:
                     if navn_v not in skjult:
                         skjult.append(navn_v)
                     continue
-                k = kat.stamme(normalize(navn_v) or navn_v.lower())
-                it = varer.setdefault(k, {"navn": navn_v, "maengder": {}, "uden_maengde": False, "retter": [], "dage": []})
+                koeb, erstatter = False, None
+                if fv and er_fryserkoed(navn_v):
+                    if fv == INTET_FRA_FRYSER:
+                        koeb = True
+                    elif not erstattet:
+                        erstattet = True
+                        if normalize(fv) != normalize(navn_v):
+                            erstatter, navn_v = navn_v, fv[0].upper() + fv[1:]
+                k = kat.stamme(normalize(navn_v) or navn_v.lower()) + ("|koeb" if koeb else "")
+                it = varer.setdefault(k, {"navn": navn_v, "maengder": {}, "uden_maengde": False, "retter": [], "dage": [],
+                                          "koeb": koeb, "erstatter": []})
+                if erstatter and erstatter not in it["erstatter"]:
+                    it["erstatter"].append(erstatter)
                 q = v.get("mængde")
                 e = v.get("enhed") or ""
                 if q is None or e not in op.LISTE_ENHED:
@@ -1226,7 +1350,7 @@ class IndkobMadplanManager:
             tekst = (it["navn"] + " " + " + ".join(x for x in dele if x)).strip()
             ex = self._existing(it["navn"])
             koebt = None if ex else self._senest_koebt(it["navn"], koebt_siden)
-            koed = er_fryserkoed(it["navn"])
+            koed = er_fryserkoed(it["navn"]) and not it["koeb"]
             i_kol = "nok" if any(kol.passer(r["navn"], it["navn"]) for r in kol_nok) else (
                 "lidt" if any(kol.passer(r["navn"], it["navn"]) for r in kol_lidt) else None)
             grund = ("i kurven" if ex["checked"] else "står på listen") if ex else (
@@ -1240,6 +1364,7 @@ class IndkobMadplanManager:
                 "kategori": kat.NAVN.get(noegle, ""), "orden": kat.ORDEN.get(noegle, 99),
                 "koed": koed, "paa_listen": bool(ex), "linje_id": ex["id"] if ex else None, "koebt": koebt,
                 "valgt": not (ex or koed or koebt or i_kol == "nok"), "grund": grund, "koleskab": i_kol,
+                **({"erstatter": it["erstatter"]} if it["erstatter"] else {}),  # 0.13.0: ❄-kødet erstatter dette
             })
         ud.sort(key=lambda x: (x["orden"], x["navn"].lower()))
         for x in ud:
@@ -1253,8 +1378,15 @@ class IndkobMadplanManager:
         }
 
     @callback
-    def tilfoej_til_retter(self, varer: list[dict], user: str | None = None) -> dict:
-        """Læg ugens varer på listen med retmærke (står varen der, får den bare mærket)."""
+    def tilfoej_til_retter(self, varer: list[dict], user: str | None = None, *,
+                           madplan_version: int | None = None) -> dict:
+        """Læg ugens varer på listen med retmærke (står varen der, får den bare mærket).
+
+        0.13.0: `madplan_version` = den version, arket "Varer til ugen" blev regnet ud fra. Er madplanen
+        ændret siden, afvises tilføjelsen (ConflictError), så arket kan regnes ud igen.
+        """
+        if madplan_version is not None and madplan_version != self.madplan_note.version:
+            raise ConflictError
         nye, fandtes = [], []
         for v in varer:
             tekst = (v.get("tekst") or "").strip()
@@ -1301,6 +1433,7 @@ class IndkobMadplanManager:
 
     @callback
     def set_omregning(self, changes: dict | None, user: str | None = None, *, nulstil: bool = False) -> dict:
+        self._tjek_bank()
         if nulstil:
             if self.bank.nulstil_omregning():
                 self._log(user, "indstillinger", "gendannede standard-omregningen af opskrifter")
@@ -1314,6 +1447,7 @@ class IndkobMadplanManager:
 
     @callback
     def importer_opskrifter(self, tekst: str, user: str | None = None, *, erstat: bool = True) -> dict:
+        self._tjek_bank()
         res = self.bank.importer(tekst, erstat=erstat, t=dt_util.now().isoformat(timespec="seconds"))
         self.bank.konverteret()
         self._log(user, "retter", f'importerede {res["antal"]} opskrifter ({res["nye"]} nye, {res["opdaterede"]} opdaterede'
@@ -1488,24 +1622,90 @@ class IndkobMadplanManager:
         }
 
     @callback
-    def indsaet_uge(self, linjer: list[dict], base_version: int | None = None, user: str | None = None) -> dict:
-        """Skriv den færdige uge øverst i madplanen ("Uge NN" + én linje pr. dag)."""
+    def indsaet_uge(self, linjer: list[dict], base_version: int | None = None, user: str | None = None, *,
+                    kraev_version: bool = False) -> dict:
+        """Skriv den planlagte uge i madplanen.
+
+        0.13.0: dage, der allerede har en linje (fx Mettes tomme skabelon "Uge 43"), skrives på
+        den linje; manglende dage sættes ind i den uge, de hører til; kun dage uden nogen uge får en
+        ny "Uge NN"-blok øverst (som før). Er madplanen ændret siden `base_version`, gemmes kun, hvis
+        de dage, der skrives, er uændrede (ellers ConflictError).
+        """
+        n = self.madplan_note
         dage = sorted(
             ((date.fromisoformat(x["dato"]), (x.get("linje") or "").strip()) for x in linjer),
             key=lambda t: t[0],
         )
         if not dage:
-            return {"version": self.madplan_note.version}
-        tekst = []
+            return {"version": n.version}
+        if base_version is None and kraev_version:
+            raise ConflictError
+        today = dt_util.now().date()
+        if base_version is not None and base_version != n.version:
+            base = self._madplan_tekst(base_version)
+            if base is None:
+                raise ConflictError
+            vb, vn = vindere(scan_linjer(base, today)), vindere(scan_linjer(n.text, today))
+            for d, _ln in dage:
+                rb = vb[d].dag.raw.strip() if d in vb else ""
+                rn = vn[d].dag.raw.strip() if d in vn else ""
+                if rb != rn:
+                    raise ConflictError
+        ud = []
         for d, ln in dage:
             # Linjen kommer fra panelet; sikr at den starter med den rigtige ugedag
             body = ln.split(":", 1)[1].strip() if ":" in ln[:10] else ln
-            tekst.append(f"{UGEDAGE[d.weekday()]}: {body}".rstrip())
-        blok = f"Uge {dage[0][0].isocalendar()[1]}\n" + "\n".join(tekst)
-        gammel = self.madplan_note.text.strip()
-        self.set_madplan(blok + ("\n\n" + gammel if gammel else "") + "\n", base_version, user)
+            ud.append((d, f"{UGEDAGE[d.weekday()]}: {body}".rstrip()))
+        ny_tekst, info = self._indsaet_i_tekst(n.text, ud, today)
+        self.set_madplan(ny_tekst, n.version, user)
         self._log(user, "madplan", f"planlagde uge {dage[0][0].isocalendar()[1]} med ugeplanlæggeren", key="madplan:plan")
-        return {"version": self.madplan_note.version}
+        return {"version": self.madplan_note.version, **info}
+
+    @staticmethod
+    def _indsaet_i_tekst(tekst: str, dage: list[tuple[date, str]], today: date) -> tuple[str, dict]:
+        """Sæt dag-linjer ind i madplan-teksten uden at røre andre linjer (0.13.0)."""
+        def ny_blok(rest: list[tuple[date, str]], gammel: str) -> str:
+            blok = f"Uge {rest[0][0].isocalendar()[1]}\n" + "\n".join(x for _d, x in rest)
+            gammel = gammel.strip()
+            return blok + ("\n\n" + gammel if gammel else "") + "\n"
+
+        if not tekst.strip() or any(ch in tekst for ch in _ANDRE_LINJESKIFT):
+            return ny_blok(dage, tekst), {"erstattet": 0, "indsat": 0, "ny_blok": True}
+        linjer = scan_linjer(tekst, today)
+        vind = vindere(linjer)
+        blokke: dict[int, list] = {}
+        for ln in linjer:
+            blokke.setdefault(ln.blok, []).append(ln)
+        # nyeste uge først (samme regel som parseren: senest startende blok vinder)
+        orden = sorted(blokke.values(), key=lambda b: b[0].dag.dato, reverse=True)
+        erstat: dict[int, str] = {}
+        efter: dict[int, list[tuple[date, str]]] = {}
+        rest: list[tuple[date, str]] = []
+        for d, ny in dage:
+            if (v := vind.get(d)) is not None:
+                erstat[v.idx] = ny
+                continue
+            placeret = False
+            for b in orden:
+                # kun ind i en uge, dagen hører til: højst 6 dage efter ugens første dag
+                foer = [ln for ln in b if ln.dag.dato < d]
+                if not foer or (d - b[0].dag.dato).days > 6:
+                    continue
+                efter.setdefault(foer[-1].idx, []).append((d, ny))
+                placeret = True
+                break
+            if not placeret:
+                rest.append((d, ny))
+        rader = tekst.splitlines()
+        ud: list[str] = []
+        for i, r in enumerate(rader):
+            ud.append(erstat.get(i, r))
+            ud.extend(x for _d, x in sorted(efter.get(i, [])))
+        res = "\n".join(ud) + ("\n" if tekst.endswith("\n") else "")
+        info = {"erstattet": len(erstat), "indsat": sum(len(v) for v in efter.values()), "ny_blok": bool(rest)}
+        if rest:
+            res = ny_blok(rest, res)
+        return res, info
 
     # ------------------------------------------------------------ kladde (0.12.3)
     def kladde_hent(self) -> dict | None:
@@ -1848,7 +2048,8 @@ class IndkobMadplanManager:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Retkataloget fejlede")
             return {"version": None}
-        return {"version": k["version"], **k["antal"], "importeret": k["importeret"]}
+        return {"version": k["version"], **k["antal"], "importeret": k["importeret"],
+                "laast": getattr(self, "_bank_laast", None)}
 
     def state(self) -> dict:
         """Alt hvad panel og kort skal bruge."""
@@ -1875,7 +2076,7 @@ class IndkobMadplanManager:
                     "timer": self.trip_delay.total_seconds() / 3600,
                     "butikker": [
                         {"id": st["id"], "butik": st["butik"], "beloeb": st["beloeb"], "t": st["t"],
-                         "antal": len(st["line_ids"])}
+                         "antal": len(st["line_ids"]) + st.get("slettet", 0)}
                         for st in self._stops()
                     ],
                     "koebt": self.bought(),
@@ -1891,6 +2092,9 @@ class IndkobMadplanManager:
                 "dage": self.uge(-1, 9),
                 "sidste_dato": self.sidste_dato(),
                 "frost_dag": "i morgen" if self.frost_tomorrow else "i dag",
+                # 0.13.0: dage der står forskelligt i to uger (kun advarsel) + hvor "Ny uge" skal starte
+                "overlap": getattr(self, "_overlap", []),
+                "ny_uge": self.ny_uge(),
             },
             "stats": {k: v for k, v in self.stats.items() if k != "varer"},
             "indstillinger": self.settings(),

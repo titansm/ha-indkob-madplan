@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.12.6";
+export const VERSION = "0.13.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -219,7 +219,7 @@ export class Checklist {
   constructor(container, store, {
     editable = true, hideChecked = false, onFocusLine = null, scroller = null,
     onDelete = null, tapToggle = false, swipe = null, plus = false, onPlusAdded = null,
-    checkbox = true, onFast = null,
+    checkbox = true, onFast = null, onFejl = null,
   } = {}) {
     this.el = container;
     this.store = store;
@@ -235,6 +235,8 @@ export class Checklist {
     this.onPlusAdded = onPlusAdded; // (svar fra indkob/add, tekst)
     this.checkbox = checkbox; // false = ingen flueben (basislisten)
     this.onFast = onFast; // (linje) -> tryk på "Engangs"-mærket (gør varen fast)
+    // 0.13.0: ({tekst, fejl, igen}) -> en ændring blev IKKE gemt (vis det tydeligt, med "Prøv igen")
+    this.onFejl = onFejl;
     this.plusRows = new Map(); // overskrift-id -> række
     this.fixed = new Set(); // id'er på faste kategorier (skjules når de er tomme)
     this.bought = new Map(); // linje-id -> butik (købt i en butik, der er afsluttet på turen)
@@ -807,10 +809,40 @@ export class Checklist {
     const id = row.dataset.id;
     const ln = this._line(id);
     if (!ln) return;
-    ln.checked = !ln.checked; // optimistisk
-    this.render();
-    if (ln.checked && navigator.vibrate) navigator.vibrate(8);
-    this.store.update(id, { checked: ln.checked }).catch(() => {});
+    const ny = !ln.checked;
+    const anvend = () => {
+      const l = this._line(id);
+      if (l) l.checked = ny;
+      this.render();
+    };
+    anvend(); // optimistisk
+    if (ny && navigator.vibrate) navigator.vibrate(8);
+    // 0.13.0: afvises ændringen (fx ingen forbindelse), rulles fluebenet synligt tilbage, og det siges højt
+    this._gem(id, { checked: ny }, `"${(ln.text || "").trim() || "Varen"}" blev ikke ${ny ? "krydset af" : "fjernet fra kurven"}`, {
+      anvend,
+      rul: () => {
+        const l = this._line(id);
+        if (l) l.checked = !ny;
+        this.render();
+      },
+    });
+  }
+
+  /* 0.13.0: send en ændring; vis "afventer" på rækken, og meld fejl i stedet for at tie */
+  _gem(id, changes, tekst, { anvend = null, rul = null } = {}) {
+    this.rows.get(id)?.classList.add("afventer");
+    return this.store.update(id, changes).then(
+      () => this.rows.get(id)?.classList.remove("afventer"),
+      (e) => {
+        this.rows.get(id)?.classList.remove("afventer");
+        rul?.();
+        const igen = e?.code === "not_found" ? null : () => {
+          anvend?.();
+          return this._gem(id, changes, tekst, { anvend, rul });
+        };
+        if (this.onFejl) this.onFejl({ tekst, fejl: e, igen });
+      },
+    );
   }
 
   _input(e) {
@@ -834,7 +866,7 @@ export class Checklist {
     let changes = { text: tx.value };
     // En tom linje der får tekst bliver en vare
     if (ln.type === "blank" && tx.value.trim()) changes.line_type = "item";
-    this.store.update(id, changes).catch(() => {});
+    this._gem(id, changes, `"${tx.value.trim() || "Linjen"}" blev ikke gemt`);
   }
 
   async _key(e) {
@@ -849,7 +881,7 @@ export class Checklist {
       const value = e.target.value;
       // Enter på tom vare: ud af listen (som i Noter) -> tom linje
       if (ln.type === "item" && !value.trim()) {
-        this.store.update(id, { line_type: "blank", text: "" }).catch(() => {});
+        this._gem(id, { line_type: "blank", text: "" }, "Den tomme linje blev ikke gemt");
         return;
       }
       try {
@@ -861,7 +893,7 @@ export class Checklist {
       const idx = this.lines.findIndex((l) => l.id === id);
       const prev = this.lines.slice(0, idx).reverse().find((l) => l.type !== "blank" || this.editable);
       this.dirty.delete(id);
-      this.store.remove([id]).catch(() => {});
+      this.store.remove([id]).catch((e2) => this.onFejl?.({ tekst: "Linjen blev ikke slettet", fejl: e2, igen: null }));
       if (prev) this._focusSoon(prev.id, "end");
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       const idx = this.lines.findIndex((l) => l.id === id);
@@ -1060,6 +1092,7 @@ export const BASE_CSS = `
   /* tjekliste */
   .cl { display: flex; flex-direction: column; }
   .ln { position: relative; overflow: hidden; touch-action: pan-y; }
+  .ln.afventer { opacity: .62; transition: opacity .2s .25s; }
   .ln .inner { display: flex; align-items: center; gap: 12px; min-height: 44px; background: var(--im-bg); position: relative; z-index: 1; }
   .ln.item { border-bottom: 1px solid var(--im-line); }
   .ln.blank .inner { min-height: 14px; }

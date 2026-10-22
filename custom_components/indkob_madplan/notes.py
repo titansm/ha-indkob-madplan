@@ -235,20 +235,19 @@ class ShoppingNote:
         return line
 
     def move_to_category(self, line_id: str, *, header_id: str | None = None, noegle: str | None = None) -> None:
-        """Flyt en vare til sidst i en kategori (overskrift efter id eller fast nøgle)."""
+        """Flyt en vare til sidst i en kategori (overskrift efter id eller fast nøgle).
+
+        0.13.0: målet valideres FØR varen tages ud – en ukendt overskrift/nøgle giver
+        KeyError, og listen er uændret (før endte varen nederst).
+        """
+        self.index(line_id)
+        if header_id:
+            if header_id == line_id or self.get(header_id)["type"] != TYPE_HEADER:
+                raise KeyError(header_id)
+        elif noegle not in K.ORDEN:
+            raise KeyError(noegle)
         ln = self.lines.pop(self.index(line_id))
-        try:
-            if header_id:
-                idx = self.index(header_id)
-                if self.lines[idx]["type"] != TYPE_HEADER:
-                    raise KeyError(header_id)
-            elif noegle in K.ORDEN:
-                idx = self.ensure_category(noegle)
-            else:
-                raise KeyError(noegle)
-        except KeyError:
-            self.lines.insert(self._end_position(), ln)
-            raise
+        idx = self.index(header_id) if header_id else self.ensure_category(noegle)
         self.lines.insert(self._group_end(idx), ln)
 
     def category_of(self, line_id: str) -> str | None:
@@ -308,7 +307,13 @@ class ShoppingNote:
         self.lines = [ln for ln in self.lines if ln["id"] not in ids]
 
     def move(self, line_id: str, after_id: str | None) -> None:
-        ln = self.lines.pop(self.index(line_id))
+        # 0.13.0: kilde og mål valideres FØR listen ændres – fejler det, er listen uændret
+        src = self.index(line_id)
+        if after_id == line_id:
+            return
+        if after_id:
+            self.index(after_id)  # KeyError, hvis målet er slettet imens
+        ln = self.lines.pop(src)
         pos = 0 if not after_id else self.index(after_id) + 1
         self.lines.insert(pos, ln)
 

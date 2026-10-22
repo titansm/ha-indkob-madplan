@@ -21,8 +21,8 @@
  * dem, foreslås først og lægges på de første dage. Ændres køleskabet, får de dage, I ikke selv har
  * valgt, et nyt bud (som "Bland").
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.6";
-import "./im-koleskab.js?v=0.12.6";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.13.0";
+import "./im-koleskab.js?v=0.13.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -118,6 +118,8 @@ class UgePlan extends HTMLElement {
     this._kladde = null;
     this._gemt = false;
     this._sidstGemt = null;
+    this._mpVersion = null;
+    this._overskriv = false;
     this._render();
     const kol = this.shadowRoot.getElementById("kol");
     kol.setup(store);
@@ -145,9 +147,11 @@ class UgePlan extends HTMLElement {
     }
     this.data = kd.data;
     this.days = kd.days.map((d) => ({ ...d, visTags: false }));
+    // 0.13.0: madplanens version, ugen blev planlagt ud fra (ældre kladder: den nuværende)
+    this._mpVersion = kd.mpv ?? this.store.state?.madplan?.version ?? null;
     if (kd.opts) this.opts = { nye: kd.opts.nye ?? this.opts.nye, rester: kd.opts.rester ?? this.opts.rester };
     this._kladde = { tid: k.tid, af: k.af };
-    this._sidstGemt = JSON.stringify({ v: 1, data: this.data, days: this.days, opts: this.opts });
+    this._sidstGemt = JSON.stringify({ v: 1, data: this.data, days: this.days, opts: this.opts, mpv: this._mpVersion ?? null });
     return true;
   }
 
@@ -162,7 +166,7 @@ class UgePlan extends HTMLElement {
     clearTimeout(this._kladdeTimer);
     this._kladdeTimer = null;
     if (!this.data || this._gemt || !this.store) return;
-    const json = JSON.stringify({ v: 1, data: this.data, days: this.days, opts: this.opts });
+    const json = JSON.stringify({ v: 1, data: this.data, days: this.days, opts: this.opts, mpv: this._mpVersion ?? null });
     if (json === this._sidstGemt) return;
     this._sidstGemt = json;
     this.store.send("madplan/kladde/gem", { kladde: JSON.parse(json) }).catch(() => {
@@ -234,6 +238,7 @@ class UgePlan extends HTMLElement {
         });
       }
       this.data = res;
+      if (kunDag === null) this._mpVersion = this.store.state?.madplan?.version ?? null; // 0.13.0: planens grundlag
       if (kunDag === null) await this._afstem();
     } catch (e) {
       this._fejl = e?.message || "Kunne ikke lave forslag.";
@@ -761,11 +766,20 @@ class UgePlan extends HTMLElement {
     this._busy = true;
     this._renderBody();
     try {
+      // 0.13.0: versionen, ugen blev planlagt ud fra. Har nogen ændret de samme dage imens, gemmes
+      // intet – andet tryk på Gem overskriver dagene (bevidst valg); kladden bevares hele tiden.
+      const nu = this.store.state?.madplan?.version ?? null;
+      const base = this._overskriv ? nu : (this._mpVersion ?? nu);
       try {
-        await this.store.send("madplan/indsaet", { linjer, base_version: this.store.state?.madplan?.version ?? null });
+        await this.store.send("madplan/indsaet", { linjer, base_version: base });
       } catch (e) {
         if (e?.code !== "conflict") throw e;
-        await this.store.send("madplan/indsaet", { linjer, base_version: null });
+        this._busy = false;
+        this._overskriv = true;
+        const hvem = this.store.state?.madplan?.updated_by;
+        this._fejl = `${hvem || "Nogen"} har ændret de samme dage i madplanen imens. Ugen er gemt som kladde – tryk Gem igen for at overskrive dagene, eller luk og se madplanen først.`;
+        this._renderBody();
+        return;
       }
       this._busy = false;
       // Ugen står nu i madplanen – kladden er brugt
