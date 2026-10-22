@@ -12,8 +12,12 @@
  * Kladde (0.12.3): ugen gemmes løbende i HA (madplan/kladde/gem) – et halvt sekund efter hver
  * ændring og straks ved luk – og hentes igen, næste gang planlæggeren åbnes (også på en anden
  * enhed). Kladden slettes, når ugen gemmes i madplanen, eller med "Start forfra".
+ *
+ * Kød fra fryseren (0.12.4): har retten flere muligheder under "Fra fryseren" (fx burger: hakket
+ * oksekød eller kyllingebryst), spørger dagen "Hvilket kød?". Valget skrives i madplanen som
+ * "burger (❄ kyllingebryst)", så påmindelsen om at tage kød op siger det rigtige.
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.3";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.4";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -27,6 +31,8 @@ const ICON_UNLOCK = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden
 const ICON_SHUFFLE = `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M14.6 4H20v5.4l-2-2-3.3 3.3-1.4-1.4L16.6 6l-2-2ZM4 5.4 5.4 4 20 18.6 18.6 20 4 5.4ZM14.6 20l2-2-2.6-2.6 1.4-1.4 2.6 2.6 2-2V20h-5.4ZM4 18.6l5.6-5.6 1.4 1.4L5.4 20 4 18.6Z"/></svg>`;
 const ICON_NEXT = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35A7.95 7.95 0 0 0 12 4Z"/></svg>`;
 
+const INTET = "intet"; // "intet fra fryseren" – samme ord som backenden
+const koedNavn = (a) => (a === INTET ? "Intet fra fryseren" : a);
 const lowerFirst = (s) => (s && !/^[A-ZÆØÅ]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");
 const kortDato = (iso) => {
   const d = new Date(iso + "T12:00:00");
@@ -247,6 +253,7 @@ class UgePlan extends HTMLElement {
       visTags: false,
       dobbelt: !!p.stor_portion, // dobbelt portion uden (eller ud over) en rester-dag
       restFra: null, // dato for den dag, resterne kommer fra (sat når I selv vælger det)
+      koed: p.fryser_valg || null, // valgt kød fra fryseren, når retten har flere muligheder
     };
   }
 
@@ -303,6 +310,21 @@ class UgePlan extends HTMLElement {
 
   _erDobbelt(i) {
     return this._lavesMad(i) && (this.days[i].dobbelt || this._restDage(i).length > 0);
+  }
+
+  /* Kød fra fryseren: mulighederne for dagens ret, når der skal vælges (mindst to) */
+  _koedValg(i) {
+    if (!this._lavesMad(i)) return null;
+    const v = this.days[i].valg;
+    const alts = v.fryser ?? this.data?.fryser?.[v.navn] ?? null;
+    return Array.isArray(alts) && alts.length > 1 ? alts : null;
+  }
+
+  /* Dage der mangler et kødvalg og bliver skrevet ved Gem */
+  _manglerKoed() {
+    return this.days
+      .map((d, i) => i)
+      .filter((i) => this._koedValg(i) && !this.days[i].koed && !(this.days[i].eksisterende && !this.days[i].aendret));
   }
 
   _restValg(i) {
@@ -402,6 +424,7 @@ class UgePlan extends HTMLElement {
     krop.innerHTML = `
       ${this._introHTML()}
       ${this._fejl ? `<p class="fejl">${esc(this._fejl)}</p>` : ""}
+      ${this._koedBesked ? `<p class="koedbesked">❄ ${esc(this._koedBesked)}</p>` : ""}
       <ol class="dage ${this._busy ? "travl" : ""}">${this.days.map((day, i) => this._dagHTML(day, i)).join("")}</ol>
       ${this._balanceHTML()}
       <details class="hvordan">
@@ -410,6 +433,7 @@ class UgePlan extends HTMLElement {
         <p>Vaner på ugedage tæller med (burger om fredagen), og på travle aftener – nattevagt, fodbold, én voksen – vælges nemme retter, eller rester fra en dobbelt portion dagen før. Der er variation i kød og tilbehør, og der er lidt tilfældighed, så ugerne ikke bliver ens.</p>
         <p>Nye retter ligner altid noget, I allerede kan lide. Tryk på en ret for flere bud, og vælg "Vis ikke igen" for retter, I er færdige med.</p>
         <p>Portion: tryk på retten og vælg Normal eller Dobbelt. Dobbelt kan være uden en bestemt dag (fryser/frokost) eller med rester på en af de næste dage.</p>
+        <p>Kød fra fryseren: kan en ret laves med flere slags kød (fx burger), vælger I under retten, hvilket det bliver – så siger påmindelsen om at tage kød op det rigtige.</p>
       </details>`;
     this._kladdeSenere();
     r.getElementById("bund").innerHTML = `
@@ -477,9 +501,22 @@ class UgePlan extends HTMLElement {
                  ${v.varianter?.length ? `<span class="rv">Fx ${v.varianter.slice(0, 2).map((x) => esc(lowerFirst(x))).join(" eller ")}</span>` : ""}
                </button>`
             : `<button class="ret" data-a="vaelg"><span class="rn tom">Vælg en ret</span></button>`}
+        ${this._koedHTML(i)}
         ${!ude && day.alts.length ? `<button class="naeste" data-a="naeste">${ICON_NEXT}<span>Andet bud</span></button>` : ""}
         ${day.kalender.length ? `<div class="kal-l">${day.kalender.map((k) => `<span>📅 ${esc(k)}</span>`).join("")}</div>` : ""}
       </li>`;
+  }
+
+  _koedHTML(i) {
+    const alts = this._koedValg(i);
+    const day = this.days[i];
+    if (!alts || (day.eksisterende && !day.aendret && !day.koed)) return "";
+    const mangler = !day.koed;
+    return `
+      <div class="koed ${mangler ? "mangler" : ""}" role="group" aria-label="Kød fra fryseren">
+        <span class="kl">❄ ${mangler ? "Hvilket kød?" : "Fra fryseren"}</span>
+        <span class="kchips">${alts.map((a) => `<button class="kc" data-a="koed" data-v="${esc(a)}" aria-pressed="${day.koed === a}">${esc(koedNavn(a))}</button>`).join("")}</span>
+      </div>`;
   }
 
   _balanceHTML() {
@@ -606,6 +643,7 @@ class UgePlan extends HTMLElement {
   async _vaelg(i, valg) {
     const day = this.days[i];
     const rd = this._restDage(i);
+    if (!valg || valg.navn !== day.valg?.navn) day.koed = null;
     day.valg = valg;
     day.laast = true;
     day.aendret = true;
@@ -643,12 +681,23 @@ class UgePlan extends HTMLElement {
     const noter = TAG_ORDEN.filter((t) => day.tags.includes(t)).map((t) => this.data.tags[t]?.note).filter(Boolean);
     const ret = v.rest_af ? `${lowerFirst(v.rest_af)} rest` : v.tekst || lowerFirst(v.navn);
     let s = [...noter, ret].join(" - ");
+    if (day.koed && this._koedValg(i)?.includes(day.koed)) s += ` (❄ ${day.koed})`;
     if (this._erDobbelt(i)) s += " (stor portion)";
     return `${ugedag}: ${s}`;
   }
 
   async _gem() {
     if (this._busy) return;
+    const mangler = this._manglerKoed();
+    if (mangler.length && !this._koedSpurgt) {
+      // Spørg én gang: hvilket kød skal op? (Gem igen gemmer uden)
+      this._koedSpurgt = true;
+      const navne = mangler.map((i) => `${lowerFirst(this.days[i].valg.navn)} (${this.days[i].ugedag.toLowerCase()})`);
+      this._koedBesked = `Hvilket kød skal op af fryseren til ${navne.join(" og ")}? Vælg under retten – eller tryk Gem igen for at gemme uden.`;
+      this._renderBody();
+      this.shadowRoot.querySelector(`.dag[data-i="${mangler[0]}"] .koed`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
     const linjer = this.days
       .map((d, i) => ({ d, i }))
       .filter(({ d }) => !(d.eksisterende && !d.aendret))
@@ -777,6 +826,14 @@ class UgePlan extends HTMLElement {
       }
       case "vaelg":
         return this._aabnSheet(i);
+      case "koed": {
+        const day = this.days[i];
+        const v = b.dataset.v;
+        day.koed = day.koed === v ? null : v;
+        day.aendret = true;
+        if (!this._manglerKoed().length) this._koedBesked = null;
+        return this._renderBody();
+      }
       case "valg-alt": {
         const day = this.days[this._sheet];
         const k = Number(b.dataset.k);
@@ -952,6 +1009,15 @@ const CSS = `
   .badge.rest { background: color-mix(in srgb, var(--im-frost) 18%, transparent); color: var(--im-frost); }
   .badge.stor { background: color-mix(in srgb, var(--im-acc-strong) 22%, transparent); color: var(--im-text); }
   .badge.ek { background: var(--im-bg2); color: var(--im-dim); }
+  .koedbesked { margin: 4px 2px 12px; padding: 10px 12px; border-radius: 12px; font-size: 14.5px; line-height: 1.4;
+                background: var(--im-frost-bg, rgba(109,182,230,.14)); color: var(--im-text); }
+  .koed { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0 6px; }
+  .kl { flex: none; font-size: 12.5px; font-weight: 700; color: var(--im-frost); padding-top: 8px; white-space: nowrap; }
+  .koed.mangler .kl { color: var(--im-acc-strong, var(--im-acc)); }
+  .kchips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+  .kc { padding: 6px 11px; border-radius: 999px; font-size: 14px; background: var(--im-bg2); color: var(--im-text); min-height: 36px; }
+  .koed.mangler .kc { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--im-acc-strong, var(--im-acc)) 55%, transparent); }
+  .kc[aria-pressed="true"] { background: var(--im-frost); color: #fff; font-weight: 600; box-shadow: none; }
   .naeste { display: inline-flex; align-items: center; gap: 6px; color: var(--im-acc); font-weight: 600; font-size: 14px; min-height: 36px; padding-right: 8px; }
   .kal-l { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: var(--im-dim); padding-top: 2px; }
   .dag.skel { height: 92px; background: linear-gradient(90deg, var(--im-bg) 30%, var(--im-bg2) 50%, var(--im-bg) 70%); background-size: 300% 100%;

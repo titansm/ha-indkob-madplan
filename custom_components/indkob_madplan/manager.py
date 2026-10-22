@@ -42,7 +42,10 @@ from .const import (
     STORAGE_VERSION,
     VERSION,
 )
-from .madplan import DEFAULT_KOED_ORD, DEFAULT_REST_ORD, UGEDAGE, Dag, dish_key, parse_madplan, retter
+from .madplan import (
+    _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, parse_madplan,
+    retter,
+)
 from .notes import TYPE_ITEM, ShoppingNote, TextNote
 from . import kategorier as kat
 from . import opskrifter as op
@@ -779,7 +782,7 @@ class IndkobMadplanManager:
     def dag(self, offset: int) -> dict | None:
         d = dt_util.now().date() + timedelta(days=offset)
         dag = self.madplan.get(d)
-        return dag.as_dict(self.koed_ord, DEFAULT_REST_ORD) if dag else None
+        return self._dag_ud(dag) if dag else None
 
     def uge(self, start: int = -1, days: int = 8) -> list[dict]:
         today = dt_util.now().date()
@@ -788,7 +791,7 @@ class IndkobMadplanManager:
             d = today + timedelta(days=i)
             dag = self.madplan.get(d)
             if dag:
-                item = dag.as_dict(self.koed_ord, DEFAULT_REST_ORD)
+                item = self._dag_ud(dag)
             else:
                 item = {
                     "dato": d.isoformat(), "ugedag": UGEDAGE[d.weekday()], "ret": "", "noter": [],
@@ -797,6 +800,41 @@ class IndkobMadplanManager:
             item["offset"] = i
             out.append(item)
         return out
+
+    # ------------------------------------------------------------ kød fra fryseren (0.12.4)
+    def fryser_for_navn(self, navn: str) -> list[str] | None:
+        """Kød fra fryseren til en ret (jeres egen ret) – None hvis det ikke er angivet."""
+        if not navn:
+            return None
+        kanon = pl.kanonisk(navn) or (navn[0].upper() + navn[1:])
+        key = dish_key(kanon)
+        return self.bank.fryser("e:" + key) if key else None
+
+    def _dag_ud(self, dag: Dag) -> dict:
+        """Dagen til sensorer/kort: optøning ud fra rettens "Fra fryseren", ellers ud fra kød-ordene."""
+        d = dag.as_dict(self.koed_ord, DEFAULT_REST_ORD)
+        valg = (dag.fryser_valg or "").strip().lower()
+        if valg:
+            if valg == INTET_FRA_FRYSER:
+                d.update(kraever_optoening=False, koed=[])
+            else:
+                d.update(kraever_optoening=True, koed=[valg])
+            return d
+        if _FRA_FRYSER_RE.search(dag.raw or ""):
+            return d  # "bolo fra fryseren": retten selv skal op – som hidtil
+        rest = re.compile(r"\b(" + "|".join(re.escape(r) for r in DEFAULT_REST_ORD) + r")\b", re.IGNORECASE)
+        if rest.search(dag.raw or ""):
+            return d  # rester: som hidtil
+        alts = self.fryser_for_navn(dag.ret)
+        if alts is None:
+            return d
+        d["fryser"] = alts
+        koed = [a for a in alts if a != INTET_FRA_FRYSER]
+        if not koed:
+            d.update(kraever_optoening=False, koed=[])
+            return d
+        d.update(kraever_optoening=True, koed=[" eller ".join(koed_i_tekst(koed, dag.raw or ""))])
+        return d
 
     def frost_dag(self) -> dict | None:
         return self.dag(1 if self.frost_tomorrow else 0)
@@ -918,7 +956,7 @@ class IndkobMadplanManager:
                 "rettet": "varer" in e, "standard_varer": [self._vare_ud(v) for v in k["varer"]],
                 "har_vi_altid": k["har_vi_altid"], "ikke_tolket": k["ikke_tolket"],
                 "original": [op.original_tekst(ln) for ln in r["linjer"]],
-                "rettet_t": e.get("t"), "rettet_af": e.get("af"),
+                "rettet_t": e.get("t"), "rettet_af": e.get("af"), "fryser": b.fryser(ret_id),
             }
         if not ret_id.startswith("e:"):
             raise ValueError("Ukendt ret")
@@ -943,12 +981,13 @@ class IndkobMadplanManager:
                 for s, r in forslag[:4] if s >= 0.5
             ],
             "forslag_varer": list(pl.RETTER.get(kanon, {}).get("varer", [])),
-            "rettet_t": e.get("t"), "rettet_af": e.get("af"),
+            "rettet_t": e.get("t"), "rettet_af": e.get("af"), "fryser": b.fryser(ret_id),
         }
 
     @callback
     def gem_ret(self, ret_id: str | None, user: str | None = None, *, navn: str | None = None,
-                varer: list[dict] | None | bool = False, opskrift: str | None | bool = False) -> dict:
+                varer: list[dict] | None | bool = False, opskrift: str | None | bool = False,
+                fryser: list[str] | None | bool = False) -> dict:
         """Gem jeres indkøbsliste til en ret (eller koblingen til en opskrift). ret_id None = ny egen ret."""
         if ret_id is None:
             navn = (navn or "").strip()
@@ -961,13 +1000,17 @@ class IndkobMadplanManager:
             if ret_id in self.bank.egne or key in self._egne_hist():
                 navn = None  # findes allerede – gem bare varerne på den
         try:
-            self.bank.gem(ret_id, navn=navn, varer=varer, opskrift=opskrift,
+            self.bank.gem(ret_id, navn=navn, varer=varer, opskrift=opskrift, fryser=fryser,
                           t=dt_util.now().isoformat(timespec="seconds"), af=user)
         except KeyError as err:
             raise ValueError("Retten eller opskriften findes ikke længere") from err
         rnavn = (op.paen_titel(self.bank.opskrift(ret_id[2:])["titel"]) if ret_id.startswith("r:")
                  else self._egen_navn(ret_id))
-        if varer is None and opskrift is False:
+        if fryser is not False and varer is False and opskrift is False:
+            f = self.bank.fryser(ret_id)
+            tekst = (f'fjernede "Fra fryseren" fra "{rnavn}"' if f is None
+                     else f'satte "Fra fryseren" på "{rnavn}": ' + (" / ".join(f) if f else "intet"))
+        elif varer is None and opskrift is False:
             tekst = f'gendannede indkøbslisten til "{rnavn}"'
         elif opskrift not in (False, None):
             tekst = f'koblede "{rnavn}" til opskriften "{op.paen_titel(self.bank.opskrift(opskrift[2:])["titel"])}"'
@@ -1343,6 +1386,7 @@ class IndkobMadplanManager:
             "antal": prof.antal if prof and not v.nyt else 0,
             "varianter": varianter,
             "tekst": pl.ret_til_madplan(v.navn),
+            "fryser": None if v.rest_af else self.fryser_for_navn(v.navn),
         }
 
     def _stor_portion(self, d: pl.DagPlan) -> bool:
@@ -1351,6 +1395,13 @@ class IndkobMadplanManager:
             return False
         eks = self.madplan.get(d.dato)
         return bool(eks and eks.stor_portion)
+
+    def _fryser_valg(self, d: pl.DagPlan) -> str | None:
+        """Kød valgt i en tidligere planlægning ("❄ …") for en dag, der allerede står i madplanen."""
+        if not d.eksisterende:
+            return None
+        eks = self.madplan.get(d.dato)
+        return eks.fryser_valg.lower() if eks and eks.fryser_valg else None
 
     def _plan_svar(self, model: pl.Model, plan: list[pl.DagPlan], start: date, dage: int, seed: int) -> dict:
         top = sorted(model.profiler.values(), key=lambda p: -p.vaegt)[:5]
@@ -1365,12 +1416,14 @@ class IndkobMadplanManager:
             },
             "tags": {k: {"label": v[0], "travl": v[1], "note": model.note_tekst.get(k, v[2])} for k, v in pl.TAGS.items()},
             "retter": [p.navn for p in sorted(model.profiler.values(), key=lambda p: (-p.antal, p.navn))],
+            "fryser": {p.navn: f for p in model.profiler.values() if (f := self.fryser_for_navn(p.navn))},
             "plan": [
                 {
                     "dato": d.dato.isoformat(), "ugedag": UGEDAGE[d.dato.weekday()],
                     "tags": sorted(d.tags), "auto_tags": sorted(d.auto_tags), "kalender": d.kalender,
                     "laast": d.laast, "eksisterende": d.eksisterende, "tekst": d.tekst,
                     "stor_portion": self._stor_portion(d),
+                    "fryser_valg": self._fryser_valg(d),
                     "valg": self._valg_dict(model, d.valg),
                     "alternativer": [self._valg_dict(model, a) for a in d.alternativer],
                 }
@@ -1654,6 +1707,51 @@ def _payments_text(betalinger: list[dict]) -> str:
 # Kød der købes friskt (ikke fra fryseren), selv om det står under Køl – kød
 _FRISK_KOED = ("bacon", "pølse", "skinke", "pancetta", "guanciale", "nduja", "chorizo", "salami", "pålæg",
                "leverpostej", "røget", "rullepølse", "spegepølse")
+
+
+# Korte ord i madplanen, der peger på en slags kød (0.12.4): "burger kylling", "pita m oksekød", "hakkekød"
+_KOED_BEGREBER: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("kylling", ("kylling", "kylle", "kalkun")),
+    ("okse", ("okse",)),
+    ("hakket", ("hakke", "hakket", "fars", "deller")),
+    ("svin", ("svin", "gris", "flæsk", "nakke")),
+    ("kalv", ("kalv",)),
+    ("lam", ("lam",)),
+    ("laks", ("laks",)),
+    ("torsk", ("torsk",)),
+    ("fisk", ("fisk",)),
+    ("rejer", ("reje",)),
+    ("pølse", ("pølse",)),
+    ("bryst", ("bryst",)),
+    ("lår", ("lår",)),
+    ("hel", ("hel",)),
+)
+
+
+def _koed_begreber(tekst: str) -> set[str]:
+    """Hvilke slags kød nævner teksten? ("kyllingebryst" → kylling + bryst, "hakkekød" → hakket)."""
+    ord_ = re.findall(r"[a-zæøåé]+", (tekst or "").lower())
+    ud = set()
+    for begreb, stammer in _KOED_BEGREBER:
+        for w in ord_:
+            if any((w.startswith(st) if len(st) <= 3 else st in w) for st in stammer):
+                ud.add(begreb)
+                break
+    return ud
+
+
+def koed_i_tekst(muligheder: list[str], tekst: str) -> list[str]:
+    """De muligheder, madplanens tekst peger på: præcist navn → flest fælles kød-ord → alle."""
+    low = (tekst or "").lower()
+    praecis = [a for a in muligheder if a in low]
+    if len(praecis) == 1:
+        return praecis
+    nævnt = _koed_begreber(low)
+    if not nævnt:
+        return list(muligheder)
+    score = {a: len(_koed_begreber(a) & nævnt) for a in muligheder}
+    bedst = max(score.values())
+    return [a for a in muligheder if score[a] == bedst] if bedst else list(muligheder)
 
 
 def er_fryserkoed(navn: str) -> bool:

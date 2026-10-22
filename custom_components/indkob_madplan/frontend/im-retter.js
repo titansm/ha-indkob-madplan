@@ -7,7 +7,7 @@
  * Elementerne har ingen egen shadow-root: de tegnes inde i panelets, så panelets typografi og
  * Indstillinger-kortene (.kort/.felt) gælder. Derfor bruges ingen data-act/data-set/data-note her.
  */
-import { esc, lsGet, lsSet } from "./im-common.js?v=0.12.3";
+import { esc, lsGet, lsSet } from "./im-common.js?v=0.12.4";
 
 const ENHEDER = ["", "g", "kg", "ml", "dl", "l", "stk", "tsk", "spsk", "fed", "dåse", "pakke", "bundt", "glas", "flaske", "knivspids"];
 const MDR = ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "dec."];
@@ -280,6 +280,31 @@ class ImRetter extends HTMLElement {
       return this._renderArk();
     }
     if (act === "vis-opskrift") return this._aabn(b.dataset.id);
+    if (act === "fryser") {
+      s.mode = "fryser";
+      s.fz = [...(s.d?.fryser || [])];
+      this._renderArk();
+      requestAnimationFrame(() => this.querySelector("#rt-fzny")?.focus());
+      return;
+    }
+    if (act === "fz-slet") {
+      s.fz.splice(+b.dataset.i, 1);
+      return this._renderArk();
+    }
+    if (act === "fz-tilfoej") return this._fzTilfoej();
+    if (act === "fz-intet") {
+      s.fz = s.fz.includes("intet") ? s.fz.filter((x) => x !== "intet") : [...s.fz, "intet"];
+      return this._renderArk();
+    }
+    if (act === "fz-gem") {
+      this._fzTilfoej(false);
+      return this._gemRaw({ ret: s.id, fryser: s.fz }, s.fz.length ? "Kød fra fryseren er gemt" : "Gemt: intet fra fryseren");
+    }
+    if (act === "fz-ryd") return this._gemRaw({ ret: s.id, fryser: null }, "Kød fra fryseren er fjernet");
+    if (act === "fz-annuller") {
+      s.mode = "vis";
+      return this._renderArk();
+    }
   }
 
   /* ---------------------------------------------------------------- ark: vis */
@@ -328,6 +353,7 @@ class ImRetter extends HTMLElement {
     const ark = this.querySelector("#rt-ark");
     if (!s || !ark) return;
     if (s.mode === "ret" || s.mode === "ny") return this._renderRet();
+    if (s.mode === "fryser") return this._renderFryser();
     if (s.mode === "vaelg") return this._renderVaelgArk();
     const d = s.d;
     const kanRette = !!d;
@@ -398,6 +424,16 @@ class ImRetter extends HTMLElement {
           <p class="rt-note">Som de står i opskriften, før omregning – fremgangsmåden står i ReciMe.</p></details>`;
       }
     } else {
+      // egen ret: kød fra fryseren (0.12.4)
+      const f = d.fryser;
+      body += `<h3 class="rt-gr">❄ Fra fryseren</h3>`;
+      body += f == null
+        ? `<p class="rt-note">Ikke angivet – påmindelsen gætter ud fra navnet.</p>`
+        : !f.length
+          ? `<p class="rt-note">Intet skal op af fryseren.</p>`
+          : `<div class="rt-fz">${f.map((a) => `<span class="rt-fzc">${esc(a === "intet" ? "Intet fra fryseren" : a)}</span>`).join("")}</div>
+             ${f.length > 1 ? `<p class="rt-note">Planlæggeren spørger, hvilket kød det bliver.</p>` : ""}`;
+      body += `<div class="rt-links"><button type="button" class="link" data-r="fryser">${f == null ? "Angiv kød fra fryseren …" : "Ret kød fra fryseren …"}</button></div>`;
       // egen ret: kobling til en opskrift
       if (d.opskrift) {
         body += `<div class="rt-kobl">
@@ -424,6 +460,51 @@ class ImRetter extends HTMLElement {
       }
     }
     ark.innerHTML = head + `<div class="rt-ab">${body}</div>`;
+  }
+
+  /* ---------------------------------------------------------------- ark: kød fra fryseren (0.12.4) */
+  _fzTilfoej(render = true) {
+    const s = this._sheet;
+    const inp = this.querySelector("#rt-fzny");
+    const v = (inp?.value || "").trim().toLowerCase();
+    if (v) for (const x of v.split(",").map((y) => y.trim()).filter(Boolean)) if (!s.fz.includes(x)) s.fz.push(x);
+    if (inp) inp.value = "";
+    if (render) {
+      this._renderArk();
+      requestAnimationFrame(() => this.querySelector("#rt-fzny")?.focus());
+    }
+  }
+
+  _renderFryser() {
+    const s = this._sheet;
+    const ark = this.querySelector("#rt-ark");
+    const koed = s.fz.filter((x) => x !== "intet");
+    const intet = s.fz.includes("intet");
+    ark.innerHTML = `<header class="rt-ah">
+        <button type="button" class="rt-hk" data-r="fz-annuller">Annullér</button>
+        <span class="rt-at">${esc(s.d.navn)}</span>
+        <button type="button" class="rt-hk fed" data-r="fz-gem">Gem</button>
+      </header>
+      <div class="rt-ab">
+        <h2 class="rt-titel">❄ Fra fryseren</h2>
+        <p class="rt-meta">Det kød, der skal op af fryseren til retten. Har den flere muligheder (fx hakket oksekød eller kyllingebryst), spørger planlæggeren, hvilket det bliver.</p>
+        <div class="rt-fz">${koed.length
+          ? koed.map((a) => `<span class="rt-fzc">${esc(a)}<button type="button" data-r="fz-slet" data-i="${s.fz.indexOf(a)}" aria-label="Fjern ${esc(a)}">×</button></span>`).join("")
+          : `<span class="rt-note">${intet ? "Intet skal op af fryseren." : "Intet kød endnu – tilføj nedenfor."}</span>`}</div>
+        <div class="rt-fzadd">
+          <input id="rt-fzny" type="text" placeholder="Fx hakket oksekød" enterkeyhint="done" autocapitalize="none" aria-label="Kød fra fryseren" />
+          <button type="button" class="rt-knap lille" data-r="fz-tilfoej">Tilføj</button>
+        </div>
+        <label class="rt-fzi"><input type="checkbox" data-r="fz-intet" ${intet ? "checked" : ""} /> ${koed.length ? "Kan også være uden kød fra fryseren" : "Intet fra fryseren"}</label>
+        <div class="rt-links"><button type="button" class="link" data-r="fz-ryd">Ryd – lad påmindelsen gætte ud fra navnet</button></div>
+        <p class="rt-fejl fejl" id="rt-fejl" hidden></p>
+      </div>`;
+    this.querySelector("#rt-fzny").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this._fzTilfoej();
+      }
+    });
   }
 
   /* ---------------------------------------------------------------- ark: rediger */
@@ -923,6 +1004,15 @@ const RETTER_CSS = `
   /* rediger */
   .rt-nynavn { width: 100%; box-sizing: border-box; font: inherit; font-size: 22px; font-weight: 700; margin: 14px 0 4px; padding: 8px 0;
                border: 0; border-bottom: 1px solid var(--im-line); background: transparent; color: var(--im-text); outline: none; }
+  .rt-fz { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
+  .rt-fzc { display: inline-flex; align-items: center; gap: 4px; padding: 6px 12px; border-radius: 999px; font-size: 14px;
+            background: var(--im-frost-bg, var(--im-bg2)); color: var(--im-frost, var(--im-text)); font-weight: 600; }
+  .rt-fzc button { font-size: 17px; line-height: 1; padding: 0 2px 0 4px; color: inherit; min-width: 24px; min-height: 24px; }
+  .rt-fzadd { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
+  .rt-fzadd input { flex: 1; min-width: 0; font: inherit; font-size: 16px; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
+                    border: 0; background: var(--im-bg2); color: var(--im-text); -webkit-appearance: none; }
+  .rt-fzi { display: flex; align-items: center; gap: 8px; font-size: 15px; margin: 8px 0; }
+  .rt-fzi input { width: 20px; height: 20px; accent-color: var(--im-acc); margin: 0; }
   .rt-fl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 10px; font-size: 14px; color: var(--im-dim); }
   .rt-fl .rt-chip { border: 1px dashed var(--im-acc); background: none; color: var(--im-acc); }
   .rt-vh, .rt-vr { display: grid; grid-template-columns: 1fr 64px 76px 36px; gap: 6px; align-items: center; }

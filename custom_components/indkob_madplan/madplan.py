@@ -63,6 +63,10 @@ DEFAULT_KOED_ORD = [
 DEFAULT_REST_ORD = ["rest", "rester", "tøm køleskabet"]
 # ... medmindre det eksplicit står at det er fra fryseren.
 _FRA_FRYSER_RE = re.compile(r"fra\s+fryse", re.IGNORECASE)
+# Kødsort valgt i ugeplanlæggeren (0.12.4): "burger (❄ kyllingebryst)"
+_FRYSER_VALG_RE = re.compile(r"\(\s*❄\s*([^()]*?)\s*\)")
+# Valg der betyder "intet skal op af fryseren"
+INTET_FRA_FRYSER = "intet"
 
 
 @dataclass
@@ -75,6 +79,7 @@ class Dag:
     noter: list[str] = field(default_factory=list)
     stor_portion: bool = False
     uge: int | None = None
+    fryser_valg: str | None = None  # kødsort valgt i planlæggeren ("❄ …")
 
     @property
     def ugedag(self) -> str:
@@ -92,6 +97,7 @@ class Dag:
             "koed": matches,
             "raw": self.raw,
             "uge": self.uge,
+            "fryser_valg": self.fryser_valg,
         }
 
 
@@ -160,8 +166,10 @@ def parse_madplan(text: str, today: date) -> dict[date, Dag]:
             delta = (wd - prev.weekday()) % 7 or 7
             d = prev + timedelta(days=delta)
         prev = d
-        ret, noter, stor = _split_entry(entry)
-        current.append(Dag(dato=d, raw=entry, ret=ret, noter=noter, stor_portion=stor, uge=week))
+        fv = _FRYSER_VALG_RE.search(entry)
+        ret, noter, stor = _split_entry(_FRYSER_VALG_RE.sub(" ", entry) if fv else entry)
+        current.append(Dag(dato=d, raw=entry, ret=ret, noter=noter, stor_portion=stor, uge=week,
+                           fryser_valg=(fv.group(1).strip() or None) if fv else None))
 
     # Ældste blok først; senere starter overskriver (men ikke med tomme dage).
     blocks = [b for b in blocks if b]
@@ -175,7 +183,7 @@ def parse_madplan(text: str, today: date) -> dict[date, Dag]:
 
 
 _DISH_STRIP_RE = re.compile(
-    r"\(?\s*(husk\s+)?(stor|dobbelt)\s+portion\s*\)?|\bx\s*2\b|\(\s*\)|\?+$", re.IGNORECASE
+    r"\(\s*❄[^()]*\)|\(?\s*(husk\s+)?(stor|dobbelt)\s+portion\s*\)?|\bx\s*2\b|\(\s*\)|\?+$", re.IGNORECASE
 )
 
 

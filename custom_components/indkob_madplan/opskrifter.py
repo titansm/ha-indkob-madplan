@@ -534,6 +534,18 @@ def ligner(a: str, b: str) -> float:
 
 
 # --------------------------------------------------------------------------- banken
+def rens_fryser(alts: list[str]) -> list[str]:
+    """Kød-muligheder: små bogstaver, uden dubletter, højst 6 à 40 tegn ("intet" = intet fra fryseren)."""
+    out: list[str] = []
+    for a in alts or []:
+        a = " ".join(str(a).split()).strip(" .,").lower()[:40]
+        if a in ("intet fra fryseren", "ingen", "intet"):
+            a = "intet"
+        if a and a not in out:
+            out.append(a)
+    return out[:6]
+
+
 def _rens_varer(varer: list[dict]) -> list[dict]:
     out = []
     for v in varer or []:
@@ -660,10 +672,17 @@ class Opskriftsbank:
             return self.varer(e["opskrift"])
         return None
 
+    def fryser(self, ret_id: str) -> list[str] | None:
+        """Kød fra fryseren til retten (0.12.4): liste med muligheder, [] = intet, None = ikke angivet."""
+        f = (self.egne.get(ret_id) or {}).get("fryser")
+        return list(f) if isinstance(f, list) else None
+
     def gem(self, ret_id: str, *, navn: str | None = None, varer: list[dict] | None | bool = False,
-            opskrift: str | None | bool = False, t: str | None = None, af: str | None = None) -> None:
+            opskrift: str | None | bool = False, fryser: list[str] | None | bool = False,
+            t: str | None = None, af: str | None = None) -> None:
         """varer: liste = gem · None = slet rettelsen (tilbage til opskriftens/ingen) · False = uændret.
-        opskrift: "r:<id>" = brug den opskrifts varer · None = fjern koblingen · False = uændret."""
+        opskrift: "r:<id>" = brug den opskrifts varer · None = fjern koblingen · False = uændret.
+        fryser: liste = kød fra fryseren ([] = intet) · None = ikke angivet · False = uændret."""
         if ret_id.startswith("r:") and not self.opskrift(ret_id[2:]):
             raise KeyError(ret_id)
         e = dict(self.egne.get(ret_id) or {})
@@ -681,6 +700,11 @@ class Opskriftsbank:
                 if not opskrift.startswith("r:") or not self.opskrift(opskrift[2:]):
                     raise KeyError(opskrift)
                 e["opskrift"] = opskrift
+        if fryser is not False:
+            if fryser is None:
+                e.pop("fryser", None)
+            else:
+                e["fryser"] = rens_fryser(fryser)
         e["t"], e["af"] = t, af
         if set(e) <= {"t", "af"} or (ret_id.startswith("r:") and set(e) <= {"t", "af", "navn"}):
             self.egne.pop(ret_id, None)
