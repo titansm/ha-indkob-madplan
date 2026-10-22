@@ -67,6 +67,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_omregning__hent, ws_omregning__saet, ws_opskrifter__importer,
         ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
         ws_madplan__kladde__hent, ws_madplan__kladde__gem, ws_madplan__kladde__slet,
+        ws_koleskab__tilfoej, ws_koleskab__saet, ws_koleskab__fjern,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -427,6 +428,26 @@ def ws_stats__slet_vare(m: IndkobMadplanManager, msg: dict, user: str | None) ->
 @_ws({vol.Required("bekraeft"): True})
 def ws_stats__clear(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
     m.clear_history(user)
+
+
+# ---------------------------------------------------------------- køleskabet (0.12.5)
+@_ws({
+    vol.Required("navne"): vol.All([vol.All(str, vol.Length(min=1, max=200))], vol.Length(min=1, max=20)),
+    vol.Optional("nok"): vol.Any(None, bool),  # None = Nok, medmindre varen står i basislisten
+    vol.Optional("liste", default=True): bool,  # False = rør ikke indkøbslisten (fx Fortryd)
+})
+def ws_koleskab__tilfoej(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.koleskab_tilfoej(msg["navne"], user, nok=msg.get("nok"), liste=msg["liste"])
+
+
+@_ws({vol.Required("rest_id"): str, vol.Required("nok"): bool})
+def ws_koleskab__saet(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.koleskab_saet(msg["rest_id"], msg["nok"], user)
+
+
+@_ws({vol.Required("rest_ids"): vol.All([str], vol.Length(min=1, max=50))})
+def ws_koleskab__fjern(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.koleskab_fjern(msg["rest_ids"], user)
 
 
 PAYMENTS = vol.All([{

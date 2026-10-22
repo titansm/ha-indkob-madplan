@@ -2,14 +2,16 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.12.4";
-import "./im-planner.js?v=0.12.4";
-import "./im-retter.js?v=0.12.4";
-import "./im-ugevarer.js?v=0.12.4";
+} from "./im-common.js?v=0.12.5";
+import "./im-planner.js?v=0.12.5";
+import "./im-retter.js?v=0.12.5";
+import "./im-ugevarer.js?v=0.12.5";
+import "./im-koleskab.js?v=0.12.5";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
   { id: "basis", title: "Basisliste" },
+  { id: "koleskab", title: "Køleskab" },
   { id: "madplan", title: "Madplan" },
   { id: "retter", title: "Retter" },
   { id: "historik", title: "Indkøbshistorik" },
@@ -172,6 +174,21 @@ class IndkobMadplanPanel extends HTMLElement {
                   <p><b>Basislisten er jeres faste indkøbsliste.</b> Når et indkøb er afsluttet (automatisk nogle timer efter sidste flueben eller med "Færdig med at handle"), nulstilles indkøbslisten til den: alle flueben fjernes, købte engangsvarer slettes, og faste varer, der er blevet slettet undervejs, sættes tilbage i deres kategori. Engangsvarer, der endnu ikke er købt, bliver stående.</p>
                   <p><b>Rediger her</b> som på indkøbslisten: skriv i feltet øverst, brug ＋ under en kategori, træk i ≡, swipe for at slette. Flueben findes ikke her. Overskrifterne bestemmer, hvor varen lander, når den kommer tilbage på indkøbslisten.</p>
                   <p><b>På indkøbslisten</b> er engangsvarer mærket <i>Engangs</i>. Tryk på mærket for at gøre varen fast, eller markér varen og tryk <i>Fast</i> i værktøjslinjen for at skifte. Nye varer (felt, kort, Assist, ugeplanlægger) er engangsvarer, indtil I gør dem faste.</p>
+                </div>
+              </details>
+            </section>
+            <section id="v-koleskab" class="pane">
+              <h2 class="titel">Køleskab</h2>
+              <p class="meta" id="meta-koleskab"></p>
+              <p class="basis-intro">Madvarer I har tilbage. Ugeplanlæggeren bruger dem først – i retterne de første dage i ugen – og en rest tages ud dagen efter, at retten er spist.</p>
+              <im-koleskab id="koleskab-el"></im-koleskab>
+              <details class="hjaelp">
+                <summary>ⓘ Sådan virker køleskabet</summary>
+                <div>
+                  <p><b>Skriv det, I har tilbage</b> – én ad gangen eller flere med komma, fx "fløde, champignon, ½ peberfrugt". Listen er fælles for familien og står også øverst i ugeplanlæggeren.</p>
+                  <p><b>Nok</b> = I skal ikke købe varen: den fjernes fra indkøbslisten med det samme (Fortryd i beskeden), og i "Varer til ugen" er den fravalgt. <b>Lidt</b> = der er lidt tilbage, men ikke nok til ugen: planlæggeren bruger den stadig først, men den købes som normalt. Faste varer fra basislisten (fx skyr) starter som Lidt – tryk for at skifte.</p>
+                  <p><b>Planlæg ugen:</b> retter, der bruger resterne, foreslås først og lægges på de første dage. Står resten allerede i en ret i madplanen ("Bruges fre.: …"), planlægges den ikke igen.</p>
+                  <p><b>Opbrugt:</b> dagen efter retten tages resten automatisk ud. Rester, ingen ret bruger, bliver stående, til I selv trykker ×.</p>
                 </div>
               </details>
             </section>
@@ -409,6 +426,7 @@ class IndkobMadplanPanel extends HTMLElement {
       this._renderInsp();
     });
     r.getElementById("retter-el").setup(this._storeProxy());
+    r.getElementById("koleskab-el").setup(this._storeProxy());
     r.getElementById("omregning-el").setup(this._storeProxy());
     r.addEventListener("im-toast", (e) => {
       const d = e.detail || {};
@@ -437,6 +455,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._clb.setCategories(s.basis?.kategorier);
     this._clb.setLines(s.basis?.lines);
     this._renderBasis();
+    this._renderKoleskab();
     this._updateFastBtn();
     if (!this.shadowRoot.getElementById("katvalg").hidden) this._renderKatvalg();
     this._renderNoteList();
@@ -511,6 +530,12 @@ class IndkobMadplanPanel extends HTMLElement {
       if (id === "basis") {
         const n = s.basis?.antal || 0;
         return `${n} ${n === 1 ? "fast vare" : "faste varer"}${s.basis?.updated ? " · ændret " + relTime(s.basis.updated) : ""}`;
+      }
+      if (id === "koleskab") {
+        const k = s.koleskab || [];
+        if (!k.length) return "Tomt – skriv det, I har tilbage";
+        const navne = k.slice(0, 3).map((x) => esc(x.navn)).join(", ");
+        return `${k.length} ${k.length === 1 ? "rest" : "rester"} · ${navne}${k.length > 3 ? " …" : ""}`;
       }
       if (id === "madplan") {
         const d = (s.madplan.dage || []).find((x) => x.offset === 0);
@@ -934,6 +959,16 @@ class IndkobMadplanPanel extends HTMLElement {
     }
   }
 
+  /* ------------------------------------------------------------ køleskab (0.12.5) */
+  _renderKoleskab() {
+    const k = this._state?.koleskab || [];
+    this.shadowRoot.getElementById("koleskab-el").state = this._state;
+    const lidt = k.filter((x) => !x.nok).length;
+    this.shadowRoot.getElementById("meta-koleskab").textContent = k.length
+      ? `${k.length} ${k.length === 1 ? "rest" : "rester"}${lidt ? ` · ${lidt} købes stadig` : ""}`
+      : "";
+  }
+
   /* ------------------------------------------------------------ basisliste */
   _renderBasis() {
     const s = this._state;
@@ -1194,7 +1229,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const el = this.shadowRoot.getElementById("log-liste");
     let lastDay = "";
     const dag = (iso) => new Date(iso).toLocaleDateString("da-DK", { weekday: "long", day: "numeric", month: "long" });
-    const NOTE = { indkob: "🛒", basis: "📌", madplan: "🍽", retter: "📖", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
+    const NOTE = { indkob: "🛒", basis: "📌", koleskab: "🧊", madplan: "🍽", retter: "📖", historik: "🧾", indstillinger: "⚙︎", statistik: "📊" };
     el.innerHTML = log.length
       ? log.map((l) => {
           const d = dag(l.t);

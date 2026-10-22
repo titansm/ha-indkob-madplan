@@ -20,6 +20,9 @@ Idéen i korte træk
    portion når en travl aften følger, og der vælges lidt tilfældigt blandt de
    bedste bud – så forslaget ikke bliver "de samme fem retter" hver uge.
 4. Valgfrit: én ny ret, der ligner noget I allerede elsker.
+5. Køleskabet (0.12.5): madvarer I har tilbage. Retter, der bruger dem, vælges først – på de
+   første dage i ugen, så intet når at blive dårligt. Øvrige regler (variation, travle aftener,
+   "ikke igen inden for 5 dage") gælder stadig.
 
 Ren Python uden Home Assistant-afhængigheder, så den kan testes isoleret.
 """
@@ -29,6 +32,7 @@ from __future__ import annotations
 import math
 import random
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from statistics import median
@@ -479,6 +483,7 @@ class Valg:
     ligner: str | None = None
     rest_af: str | None = None
     stor: bool = False
+    koleskab: list[str] = field(default_factory=list)  # rester fra køleskabet, retten bruger (0.12.5)
 
 
 @dataclass
@@ -494,11 +499,56 @@ class DagPlan:
     eksisterende: bool = False
 
 
+# Køleskabet: på en travl aften kun en nem ret med resterne – eller en, der er mindst så god som dagens bedste bud
+KOL_MIN_ANDEL_TRAVL = 0.25
+
+
+def _opremsning(navne: list[str]) -> str:
+    n = [x if x[:2].isupper() else x[:1].lower() + x[1:] for x in navne]
+    return n[0] if len(n) == 1 else ", ".join(n[:-1]) + " og " + n[-1]
+
+
 class Planlaegger:
-    def __init__(self, model: Model, *, skjulte: set[str] | None = None, seed: int | None = None) -> None:
+    def __init__(self, model: Model, *, skjulte: set[str] | None = None, seed: int | None = None,
+                 koleskab: list[str] | None = None,
+                 rester_for: Callable[[str, str], list[str]] | None = None) -> None:
         self.m = model
         self.skjulte = {s.lower() for s in (skjulte or set())}
         self.rnd = random.Random(seed)
+        # Køleskabet (0.12.5): restens navne + en funktion, der siger hvilke af dem en ret bruger
+        self.koleskab = list(koleskab or [])
+        self._rester_for = rester_for
+
+    def _kol(self, navn: str, tekst: str = "") -> list[str]:
+        """De rester fra køleskabet, retten bruger."""
+        if not self.koleskab or not self._rester_for or not navn:
+            return []
+        return [r for r in self._rester_for(navn, tekst) if r in self.koleskab]
+
+    def _kol_mangler(self, plan: list[DagPlan], i: int) -> set[str]:
+        """Rester, ingen anden dag i planen bruger endnu."""
+        brugt: set[str] = set()
+        for j, x in enumerate(plan):
+            if j == i or not x.valg or x.valg.rest_af or "ude" in x.tags:
+                continue
+            brugt |= set(x.valg.koleskab)
+        return set(self.koleskab) - brugt
+
+    def _vaelg_rest(self, kand: list[Valg], mangler: set[str], travl: bool) -> Valg | None:
+        """Den ret, der bruger flest af de manglende rester (vægtet lodtrækning blandt de bedste)."""
+        if not kand:
+            return None
+        bedst = kand[0].score
+        med = [(k, len(set(k.koleskab) & mangler)) for k in kand if set(k.koleskab) & mangler]
+        if travl:
+            med = [(k, n) for k, n in med
+                   if egenskaber(k.navn)["effort"] == 1 or k.score >= bedst * KOL_MIN_ANDEL_TRAVL]
+        if not med:
+            return None
+        med.sort(key=lambda x: -(x[0].score * x[1]))
+        top = med[:3]
+        weights = [max(k.score * n, 1e-6) ** 1.6 for k, n in top]
+        return self.rnd.choices([k for k, _ in top], weights=weights, k=1)[0]
 
     # -------------------------------------------------------------- hjælpere
     def _dage_siden(self, p: Profil, dato: date) -> int:
@@ -644,7 +694,10 @@ class Planlaegger:
                 grunde.append(f"{p.antal}× · sidst for {_siden(siden_dage)}")
             elif p.antal >= 1:
                 grunde.append(f"{'Én gang' if p.antal == 1 else f'{p.antal}×'} · sidst for {_siden(siden_dage)}")
-        return Valg(navn, score, grunde[:2], bool(nyt), nyt["ligner"] if nyt else None, None, stor)
+        kol = self._kol(navn)
+        if kol:
+            grunde.insert(0, f"Bruger {_opremsning(kol)} fra køleskabet")
+        return Valg(navn, score, grunde[:2], bool(nyt), nyt["ligner"] if nyt else None, None, stor, kol)
 
     def _naboer(self, dato: date, plan: list[DagPlan]) -> list[str]:
         """Retter dagen før og dagen efter (fra planen eller historikken)."""
@@ -717,6 +770,7 @@ class Planlaegger:
             rolige.sort(key=lambda i: (0 if plan[i].dato.weekday() >= 5 or "tid" in plan[i].tags else 1, self.rnd.random()))
             nye_dage = set(rolige[:antal_nye])
 
+        nye_brugt = 0
         for i, d in enumerate(plan):
             if d.laast or "ude" in d.tags:
                 continue
@@ -726,11 +780,22 @@ class Planlaegger:
                 if kilde:
                     d.valg = self._rest_valg(kilde, plan, i)
                     continue
-            kand = self.kandidater(d, plan, i, med_nye=i in nye_dage)
-            if i in nye_dage:
+            ny_dag = i in nye_dage and nye_brugt < antal_nye
+            mangler = self._kol_mangler(plan, i) if self.koleskab else set()
+            # Med rester i køleskabet må en ny ret også bruges på en anden dag (tæller med i antallet)
+            kand = self.kandidater(d, plan, i, med_nye=ny_dag or (bool(mangler) and nye_brugt < antal_nye))
+            # Køleskabet: retter med rester først – dagene planlægges forfra, så de lander tidligt i ugen
+            if mangler:
+                v = self._vaelg_rest(kand, mangler, self._travl(d.tags))
+                if v:
+                    d.valg = v
+                    nye_brugt += int(v.nyt)
+                    continue
+            if ny_dag:
                 nye = [k for k in kand if k.nyt]
                 if nye:
                     d.valg = self._traek(nye[:4])
+                    nye_brugt += 1
                     continue
             kand = [k for k in kand if not k.nyt]
             if kand:
@@ -758,11 +823,13 @@ class Planlaegger:
             kilde = self._kendt_navn(_REST_RE.sub(" ", tekst).strip(" -"))
             return Valg(tekst.strip(), 0, ["Rester"], rest_af=kilde or "Rester")
         navn = self._kendt_navn(tekst)
+        kol = self._kol(navn or tekst.strip(), tekst)
+        grunde = [f"Bruger {_opremsning(kol)} fra køleskabet"] if kol else []
         if navn:
             ny = next((n for n in NYE if n["navn"] == navn), None)
-            return Valg(navn, 0, [], nyt=bool(ny), ligner=ny["ligner"] if ny else None,
-                        stor=bool(egenskaber(navn).get("stor")))
-        return Valg(tekst.strip(), 0, [])
+            return Valg(navn, 0, grunde, nyt=bool(ny), ligner=ny["ligner"] if ny else None,
+                        stor=bool(egenskaber(navn).get("stor")), koleskab=kol)
+        return Valg(tekst.strip(), 0, grunde, koleskab=kol)
 
     def alternativer(self, plan: list[DagPlan], i: int, n: int = 8) -> list[Valg]:
         d = plan[i]

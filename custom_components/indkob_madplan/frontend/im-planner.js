@@ -16,8 +16,13 @@
  * Kød fra fryseren (0.12.4): har retten flere muligheder under "Fra fryseren" (fx burger: hakket
  * oksekød eller kyllingebryst), spørger dagen "Hvilket kød?". Valget skrives i madplanen som
  * "burger (❄ kyllingebryst)", så påmindelsen om at tage kød op siger det rigtige.
+ *
+ * Køleskabet (0.12.5): øverst står resterne i køleskabet (<im-koleskab planner>). Retter, der bruger
+ * dem, foreslås først og lægges på de første dage. Ændres køleskabet, får de dage, I ikke selv har
+ * valgt, et nyt bud (som "Bland").
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.4";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.12.5";
+import "./im-koleskab.js?v=0.12.5";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -74,6 +79,7 @@ class UgePlan extends HTMLElement {
     this._busy = false;
     this._sheet = null; // åben dag i bund-arket
     this._kladde = null; // {tid, af} når en gemt kladde er hentet
+    this._igen = false; // køleskabet blev ændret mens et bud blev hentet: bland igen bagefter
     this._skjult = () => document.visibilityState === "hidden" && this._kladdeNu();
     this.shadowRoot.addEventListener("click", (e) => this._click(e));
     this.shadowRoot.addEventListener("input", (e) => this._input(e));
@@ -113,6 +119,9 @@ class UgePlan extends HTMLElement {
     this._gemt = false;
     this._sidstGemt = null;
     this._render();
+    const kol = this.shadowRoot.getElementById("kol");
+    kol.setup(store);
+    kol.state = state;
     requestAnimationFrame(() => this.shadowRoot.querySelector(".ark")?.classList.add("inde"));
     let k = null;
     try {
@@ -178,6 +187,18 @@ class UgePlan extends HTMLElement {
 
   set hassState(s) {
     this.state = s;
+    const kol = this.shadowRoot.getElementById("kol");
+    if (kol) kol.state = s;
+  }
+
+  /* Køleskabet er ændret: nyt bud på de dage, I ikke selv har valgt */
+  async _kolAendret() {
+    if (!this.data) return;
+    if (this._busy) {
+      this._igen = true;
+      return;
+    }
+    await this._bland();
   }
 
   _luk() {
@@ -219,6 +240,10 @@ class UgePlan extends HTMLElement {
     }
     this._busy = false;
     this._render();
+    if (this._igen) {
+      this._igen = false;
+      setTimeout(() => this._kolAendret(), 0);
+    }
   }
 
   /* Efter et nyt bud på hele ugen: rester I selv har sat, følger dagens nye ret */
@@ -394,11 +419,12 @@ class UgePlan extends HTMLElement {
             <div class="tt"><b id="pl-titel">Planlæg ugen</b><small id="pl-periode"></small></div>
             <span class="tr"></span>
           </header>
-          <div class="krop" id="krop"></div>
+          <div class="krop" id="krop"><div id="kb1"></div><im-koleskab planner id="kol" hidden></im-koleskab><div id="kb2"></div></div>
           <footer class="bund" id="bund"></footer>
           <div class="sheet-bg" id="sheet-bg" hidden data-a="luk-sheet"></div>
           <div class="sheet" id="sheet" hidden role="dialog" aria-modal="true"></div>
         </section>`;
+      r.getElementById("kol").addEventListener("koleskab-aendret", () => this._kolAendret());
     }
     this._renderBody();
   }
@@ -407,24 +433,32 @@ class UgePlan extends HTMLElement {
     const r = this.shadowRoot;
     const krop = r.getElementById("krop");
     if (!krop) return;
+    const kb1 = r.getElementById("kb1");
+    const kb2 = r.getElementById("kb2");
+    const kol = r.getElementById("kol");
     const d = this.data;
     r.getElementById("pl-titel").textContent = d ? `Planlæg uge ${d.uge}` : "Planlæg ugen";
     r.getElementById("pl-periode").textContent = d ? periode(d.start, d.dage) : "";
+    kol.hidden = !d;
     if (this._fejl && !d) {
-      krop.innerHTML = `<div class="fejlboks"><p>${esc(this._fejl)}</p><button class="knap" data-a="igen">Prøv igen</button></div>`;
+      kb1.innerHTML = `<div class="fejlboks"><p>${esc(this._fejl)}</p><button class="knap" data-a="igen">Prøv igen</button></div>`;
+      kb2.innerHTML = "";
       r.getElementById("bund").innerHTML = "";
       return;
     }
     if (!d) {
-      krop.innerHTML = `<p class="laeser">Læser jeres tidligere uger …</p>` +
+      kb1.innerHTML = `<p class="laeser">Læser jeres tidligere uger …</p>` +
         Array.from({ length: 7 }, () => `<div class="dag skel"><span></span><span></span></div>`).join("");
+      kb2.innerHTML = "";
       r.getElementById("bund").innerHTML = "";
       return;
     }
-    krop.innerHTML = `
+    kol.planBrug = this._kolBrug();
+    kb1.innerHTML = `
       ${this._introHTML()}
       ${this._fejl ? `<p class="fejl">${esc(this._fejl)}</p>` : ""}
-      ${this._koedBesked ? `<p class="koedbesked">❄ ${esc(this._koedBesked)}</p>` : ""}
+      ${this._koedBesked ? `<p class="koedbesked">❄ ${esc(this._koedBesked)}</p>` : ""}`;
+    kb2.innerHTML = `
       <ol class="dage ${this._busy ? "travl" : ""}">${this.days.map((day, i) => this._dagHTML(day, i)).join("")}</ol>
       ${this._balanceHTML()}
       <details class="hvordan">
@@ -434,11 +468,25 @@ class UgePlan extends HTMLElement {
         <p>Nye retter ligner altid noget, I allerede kan lide. Tryk på en ret for flere bud, og vælg "Vis ikke igen" for retter, I er færdige med.</p>
         <p>Portion: tryk på retten og vælg Normal eller Dobbelt. Dobbelt kan være uden en bestemt dag (fryser/frokost) eller med rester på en af de næste dage.</p>
         <p>Kød fra fryseren: kan en ret laves med flere slags kød (fx burger), vælger I under retten, hvilket det bliver – så siger påmindelsen om at tage kød op det rigtige.</p>
+        <p>Køleskabet: retter, der bruger det, I har tilbage, foreslås først og lægges på de første dage, så intet bliver dårligt. Retten skal have en indkøbsliste (Noter → Retter) eller være en af planlæggerens kendte retter. Ændrer I køleskabet, får de dage, I ikke selv har valgt, et nyt bud.</p>
       </details>`;
     this._kladdeSenere();
     r.getElementById("bund").innerHTML = `
       <button class="sek" data-a="bland" ${this._busy ? "disabled" : ""}>${ICON_SHUFFLE}<span>Bland</span></button>
       <button class="prim" data-a="gem" ${this._busy ? "disabled" : ""}>Gem i madplanen</button>`;
+  }
+
+  /* Hvilken dag i forslaget bruger hver rest ("fre.: kylling i karry") */
+  _kolBrug() {
+    const out = {};
+    for (const d of this.days) {
+      const v = d.valg;
+      if (!v || v.rest_af || d.tags.includes("ude")) continue;
+      for (const n of v.koleskab || []) {
+        if (!out[n]) out[n] = `${KORT[ugedagIdx(d.dato)]}.: ${lowerFirst(v.navn)}`;
+      }
+    }
+    return out;
   }
 
   _introHTML() {
@@ -478,6 +526,7 @@ class UgePlan extends HTMLElement {
     const badges = [];
     if (v?.nyt) badges.push(`<span class="badge nyt">Nyt</span>`);
     if (v?.rest_af) badges.push(`<span class="badge rest">Rester</span>`);
+    if (v?.koleskab?.length && !ude) badges.push(`<span class="badge kol">🧊 Køleskab</span>`);
     if (erStor) badges.push(`<span class="badge stor">Lav dobbelt portion</span>`);
     if (day.eksisterende && !day.aendret) badges.push(`<span class="badge ek">Står i madplanen</span>`);
     const grunde = this._grunde(i).join(" · ");
@@ -1009,6 +1058,8 @@ const CSS = `
   .badge.rest { background: color-mix(in srgb, var(--im-frost) 18%, transparent); color: var(--im-frost); }
   .badge.stor { background: color-mix(in srgb, var(--im-acc-strong) 22%, transparent); color: var(--im-text); }
   .badge.ek { background: var(--im-bg2); color: var(--im-dim); }
+  .badge.kol { background: var(--im-frost-bg, rgba(109,182,230,.14)); color: var(--im-frost); }
+  #kol { margin: 0 0 12px; }
   .koedbesked { margin: 4px 2px 12px; padding: 10px 12px; border-radius: 12px; font-size: 14.5px; line-height: 1.4;
                 background: var(--im-frost-bg, rgba(109,182,230,.14)); color: var(--im-text); }
   .koed { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0 6px; }

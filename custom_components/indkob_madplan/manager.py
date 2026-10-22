@@ -46,8 +46,9 @@ from .madplan import (
     _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, parse_madplan,
     retter,
 )
-from .notes import TYPE_ITEM, ShoppingNote, TextNote
+from .notes import TYPE_ITEM, ShoppingNote, TextNote, new_id
 from . import kategorier as kat
+from . import koleskab as kol
 from . import opskrifter as op
 from . import planner as pl
 from .stats import History, clean_names, normalize
@@ -57,6 +58,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # Største kladde fra ugeplanlæggeren (JSON-tegn) – en uge fylder typisk 20–60 KB
 KLADDE_MAX = 400_000
+# Køleskabet (0.12.5): højst så mange rester ad gangen
+KOLESKAB_MAX = 40
 
 
 class ConflictError(Exception):
@@ -97,6 +100,10 @@ class IndkobMadplanManager:
         self._egne_cache: tuple | None = None
         self._katalog_cache: tuple | None = None
         self._bank_dirty = False
+        # Køleskabet (0.12.5): [{"id", "navn", "nok", "t", "af"}] – nok = købes ikke, ellers "lidt" (købes stadig)
+        self.koleskab: list[dict] = []
+        self._varenavne_cache: tuple | None = None
+        self._kol_brug_cache: tuple | None = None
 
     # ------------------------------------------------------------ options
     @property
@@ -184,6 +191,7 @@ class IndkobMadplanManager:
         self.trip = data.get("trip")
         self.log = data.get("log", [])
         self.planner_data = {"skjulte": [], **(data.get("planner") or {})}
+        self.koleskab = [x for x in (data.get("koleskab") or []) if isinstance(x, dict) and x.get("id") and x.get("navn")]
         try:
             self.bank = op.Opskriftsbank(await self.bank_store.async_load())
         except Exception:  # noqa: BLE001
@@ -214,6 +222,7 @@ class IndkobMadplanManager:
             async_track_time_interval(self.hass, self._on_tick, timedelta(minutes=5))
         )
         self._parse_madplan()
+        self._koleskab_opbrug(notify=False)  # var HA slukket ved midnat
         self._feed_history()
         self.stats = self.history.compute(dt_util.now())
         self._on_tick(dt_util.now())
@@ -235,6 +244,7 @@ class IndkobMadplanManager:
             "trip": self.trip,
             "log": self.log,
             "planner": self.planner_data,
+            "koleskab": self.koleskab,
         }
 
     def _save(self) -> None:
@@ -252,6 +262,7 @@ class IndkobMadplanManager:
     @callback
     def _on_midnight(self, _now: datetime) -> None:
         self._parse_madplan()
+        self._koleskab_opbrug(notify=False)
         self.stats = self.history.compute(dt_util.now())
         self._notify()
 
@@ -1119,6 +1130,9 @@ class IndkobMadplanManager:
             _LOGGER.exception("Kunne ikke læse madplanen")
             aftener = {}
         altid = self._har_vi_altid()
+        # Køleskabet (0.12.5): "nok" fravælges, "lidt" købes stadig (kun vist)
+        kol_nok = [r for r in self.koleskab if r.get("nok")]
+        kol_lidt = [r for r in self.koleskab if not r.get("nok")]
         varer: dict[str, dict] = {}
         skjult: list[str] = []
         ud_dage: list[dict] = []
@@ -1180,14 +1194,19 @@ class IndkobMadplanManager:
             ex = self._existing(it["navn"])
             koebt = None if ex else self._senest_koebt(it["navn"], koebt_siden)
             koed = er_fryserkoed(it["navn"])
+            i_kol = "nok" if any(kol.passer(r["navn"], it["navn"]) for r in kol_nok) else (
+                "lidt" if any(kol.passer(r["navn"], it["navn"]) for r in kol_lidt) else None)
             grund = ("i kurven" if ex["checked"] else "står på listen") if ex else (
-                "kød fra fryseren" if koed else (f"købt {UGEDAGE[date.fromisoformat(koebt).weekday()].lower()}" if koebt else None))
+                "i køleskabet" if i_kol == "nok" else (
+                    "kød fra fryseren" if koed else (
+                        f"købt {UGEDAGE[date.fromisoformat(koebt).weekday()].lower()}" if koebt else (
+                            "lidt i køleskabet" if i_kol == "lidt" else None))))
             noegle = kat.gaet(it["navn"]) or kat.FALLBACK
             ud.append({
                 "navn": it["navn"], "tekst": tekst, "retter": it["retter"], "dage": it["dage"],
                 "kategori": kat.NAVN.get(noegle, ""), "orden": kat.ORDEN.get(noegle, 99),
                 "koed": koed, "paa_listen": bool(ex), "linje_id": ex["id"] if ex else None, "koebt": koebt,
-                "valgt": not (ex or koed or koebt), "grund": grund,
+                "valgt": not (ex or koed or koebt or i_kol == "nok"), "grund": grund, "koleskab": i_kol,
             })
         ud.sort(key=lambda x: (x["orden"], x["navn"].lower()))
         for x in ud:
@@ -1361,7 +1380,9 @@ class IndkobMadplanManager:
                 dp.laast, dp.tekst, dp.eksisterende = True, eks.ret, True
             plan.append(dp)
         seed = seed if seed is not None else int(dt_util.now().timestamp())
-        pl.Planlaegger(model, skjulte=set(self.planner_data.get("skjulte", [])), seed=seed).planlaeg(
+        rester_kol = self._koleskab_til_plan(start)
+        pl.Planlaegger(model, skjulte=set(self.planner_data.get("skjulte", [])), seed=seed,
+                       koleskab=rester_kol, rester_for=self._rester_for(rester_kol) if rester_kol else None).planlaeg(
             plan, antal_nye=max(0, min(2, nye)), rester=rester
         )
         return self._plan_svar(model, plan, start, dage, seed)
@@ -1387,6 +1408,7 @@ class IndkobMadplanManager:
             "varianter": varianter,
             "tekst": pl.ret_til_madplan(v.navn),
             "fryser": None if v.rest_af else self.fryser_for_navn(v.navn),
+            "koleskab": list(v.koleskab),
         }
 
     def _stor_portion(self, d: pl.DagPlan) -> bool:
@@ -1470,6 +1492,204 @@ class IndkobMadplanManager:
     def kladde_slet(self) -> None:
         if self.planner_data.pop("kladde", None) is not None:
             self._save()
+
+    # ------------------------------------------------------------ køleskabet (0.12.5)
+    def _ret_varenavne(self, navn: str) -> list[str]:
+        """Varenavnene til en ret: jeres egen liste (eller opskriften med samme navn) + planlæggerens nøglevarer."""
+        if not navn:
+            return []
+        if not self._varenavne_cache or self._varenavne_cache[0] != self.bank.version:
+            self._varenavne_cache = (self.bank.version, {})
+        cache = self._varenavne_cache[1]
+        if navn not in cache:
+            kendt = navn in pl.RETTER or any(n["navn"] == navn for n in pl.NYE)
+            kanon = navn if kendt else (pl.kanonisk(navn) or (navn[:1].upper() + navn[1:]))
+            ud: list[str] = []
+            try:
+                ret_id, _, kilde = self._ret_for_dag(pl.Aften(dt_util.now().date(), "ret", kanon, navn))
+                if ret_id and kilde:
+                    ud += [v["navn"] for v in self.bank.varer(ret_id) or [] if v.get("navn")]
+            except Exception:  # noqa: BLE001 – varerne er en hjælp, ikke et krav
+                _LOGGER.debug("Kunne ikke finde varer til %s", navn, exc_info=True)
+            ud += list(pl.egenskaber(kanon).get("varer", []))
+            cache[navn] = ud
+        return cache[navn]
+
+    def _rester_for(self, rester: list[str]) -> Callable[[str, str], list[str]]:
+        """Til planlæggeren: hvilke af resterne bruger en ret (navn + evt. madplan-linje)?"""
+        memo: dict[tuple[str, str], list[str]] = {}
+
+        def f(navn: str, tekst: str = "") -> list[str]:
+            key = (navn, tekst)
+            if key not in memo:
+                varer = self._ret_varenavne(navn)
+                memo[key] = [r for r in rester if kol.bruger(r, varer, tekst)]
+            return memo[key]
+
+        return f
+
+    def _kol_start(self, it: dict) -> date:
+        """Første dag en rest kan bruges: dagen den kom i køleskabet – efter aftensmaden (kl. 18) dagen efter."""
+        t = dt_util.parse_datetime(it.get("t") or "")
+        if t is None:
+            return dt_util.now().date()
+        t = dt_util.as_local(t)
+        return t.date() + timedelta(days=1 if t.hour >= FROST_SKIFT_TIME else 0)
+
+    def _koleskab_brug(self) -> dict[str, dict]:
+        """Rest-id → den første dag i madplanen (fra resten kom i køleskabet), hvis ret bruger resten."""
+        if not self.koleskab:
+            return {}
+        key = (self.madplan_note.version, self.bank.version, dt_util.now().date(),
+               tuple((it["id"], it["navn"], it.get("t")) for it in self.koleskab))
+        if self._kol_brug_cache and self._kol_brug_cache[0] == key:
+            return self._kol_brug_cache[1]
+        try:
+            aftener = [a for a in pl.laes_historik(self.madplan) if a.slags == "ret"]
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Kunne ikke læse madplanen")
+            aftener = []
+        tidligst = min(self._kol_start(it) for it in self.koleskab)
+        aftener = [a for a in aftener if a.dato >= tidligst]
+        ud: dict[str, dict] = {}
+        for it in self.koleskab:
+            start = self._kol_start(it)
+            for a in aftener:
+                if a.dato < start:
+                    continue
+                dag = self.madplan.get(a.dato)
+                if kol.bruger(it["navn"], self._ret_varenavne(a.navn), dag.raw if dag else ""):
+                    ud[it["id"]] = {"dato": a.dato.isoformat(), "ugedag": UGEDAGE[a.dato.weekday()],
+                                    "ret": a.original}
+                    break
+        self._kol_brug_cache = (key, ud)
+        return ud
+
+    def koleskab_liste(self) -> list[dict]:
+        """Køleskabet til panel og planlægger: resterne + hvilken dag i madplanen der bruger dem."""
+        if not self.koleskab:
+            return []
+        brug = self._koleskab_brug()
+        return [{**it, "fast": self.is_fast(it["navn"]), "bruges": brug.get(it["id"])} for it in self.koleskab]
+
+    def _koleskab_til_plan(self, start: date) -> list[str]:
+        """Rester planlæggeren skal bruge: dem ingen dag før planens første dag allerede bruger."""
+        brug = self._koleskab_brug()
+        return [it["navn"] for it in self.koleskab
+                if not (b := brug.get(it["id"])) or date.fromisoformat(b["dato"]) >= start]
+
+    @callback
+    def _koleskab_opbrug(self, notify: bool = True) -> list[dict]:
+        """Dagen efter retten: rester, en ret i madplanen har brugt, fjernes fra køleskabet."""
+        if not self.koleskab:
+            return []
+        today = dt_util.now().date()
+        brug = self._koleskab_brug()
+        brugt = [(it, b) for it in self.koleskab if (b := brug.get(it["id"])) and date.fromisoformat(b["dato"]) < today]
+        if not brugt:
+            return []
+        ids = {it["id"] for it, _ in brugt}
+        self.koleskab = [it for it in self.koleskab if it["id"] not in ids]
+        for it, b in brugt:
+            self._log("Automatisk", "koleskab", f'fjernede "{it["navn"]}" fra køleskabet – brugt {b["ugedag"].lower()} ({b["ret"]})')
+        self._save()
+        if notify:
+            self._notify()
+        return [it for it, _ in brugt]
+
+    def _fjern_fra_listen(self, rester: list[dict], user: str | None) -> list[dict]:
+        """Fjern ukøbte varer fra indkøbslisten, der er det samme som rester mærket "Nok".
+
+        Returnerer de fjernede linjer med `prev` (linjen før, som ikke selv blev fjernet) til Fortryd.
+        """
+        if not rester:
+            return []
+        lines = self.indkob.lines
+        fjern_ids: set[str] = set()
+        ud: list[dict] = []
+        for ln in lines:
+            if ln["type"] != TYPE_ITEM or ln["checked"] or not ln["text"].strip():
+                continue
+            if any(kol.passer(r["navn"], ln["text"]) for r in rester):
+                fjern_ids.add(ln["id"])
+        if not fjern_ids:
+            return []
+        prev = None
+        for ln in lines:
+            if ln["id"] in fjern_ids:
+                ud.append({"text": ln["text"], "type": ln["type"], "checked": False, "prev": prev,
+                           "ret": list(ln.get("ret") or [])})
+            else:
+                prev = ln["id"]
+        self.indkob.delete(list(fjern_ids))
+        self._log(user, "indkob", "fjernede " + _names([x["text"] for x in ud]) + " fra listen – står i køleskabet")
+        self.indkob_changed(user)
+        return ud
+
+    @callback
+    def koleskab_tilfoej(self, navne: list[str], user: str | None = None, *, nok: bool | None = None,
+                         liste: bool = True) -> dict:
+        """Læg rester i køleskabet ("fløde, champignon" giver to). Nok = fjernes fra indkøbslisten."""
+        now = dt_util.now().isoformat(timespec="seconds")
+        nye, fandtes = [], []
+        for raw in navne:
+            for del_ in re.split(r"[,;\n]", raw or ""):
+                tekst = " ".join(del_.split()).strip(" .-")[:60]
+                if not kol.ord_i(tekst):
+                    continue
+                tekst = tekst[:1].upper() + tekst[1:]
+                key = " ".join(kol.ord_i(tekst))
+                ex = next((x for x in self.koleskab + nye if " ".join(kol.ord_i(x["navn"])) == key
+                           or kat.stamme(" ".join(kol.ord_i(x["navn"]))) == kat.stamme(key)), None)
+                if ex:
+                    if ex not in fandtes and ex not in nye:
+                        fandtes.append(ex)
+                    continue
+                if len(self.koleskab) + len(nye) >= KOLESKAB_MAX:
+                    raise ValueError(f"Der kan højst stå {KOLESKAB_MAX} rester i køleskabet")
+                nye.append({"id": new_id(), "navn": tekst, "nok": (not self.is_fast(tekst)) if nok is None else bool(nok),
+                            "t": now, "af": user})
+        if not nye:
+            return {"tilfoejet": [], "fandtes": fandtes, "fjernet": []}
+        self.koleskab.extend(nye)
+        self._log(user, "koleskab", "lagde " + _names([f'{x["navn"]}' + ("" if x["nok"] else " (lidt)") for x in nye])
+                  + " i køleskabet")
+        fjernet = self._fjern_fra_listen([x for x in nye if x["nok"]], user) if liste else []
+        self._save()
+        self._notify()
+        return {"tilfoejet": nye, "fandtes": fandtes, "fjernet": fjernet}
+
+    def _kol_item(self, rest_id: str) -> dict:
+        it = next((x for x in self.koleskab if x["id"] == rest_id), None)
+        if it is None:
+            raise ValueError("Resten findes ikke længere i køleskabet")
+        return it
+
+    @callback
+    def koleskab_saet(self, rest_id: str, nok: bool, user: str | None = None) -> dict:
+        """Skift mellem "Nok" (købes ikke – fjernes fra listen) og "Lidt" (købes stadig)."""
+        it = self._kol_item(rest_id)
+        if bool(it.get("nok")) == bool(nok):
+            return {"rest": it, "fjernet": []}
+        it["nok"] = bool(nok)
+        self._log(user, "koleskab", f'satte "{it["navn"]}" i køleskabet til {"nok" if nok else "lidt (købes stadig)"}',
+                  key=f"kol:{rest_id}", window=120)
+        fjernet = self._fjern_fra_listen([it], user) if nok else []
+        self._save()
+        self._notify()
+        return {"rest": it, "fjernet": fjernet}
+
+    @callback
+    def koleskab_fjern(self, rest_ids: list[str], user: str | None = None) -> dict:
+        """Tag rester ud af køleskabet (brugt, smidt ud …). Indkøbslisten røres ikke."""
+        ids = set(rest_ids)
+        ud = [x for x in self.koleskab if x["id"] in ids]
+        if ud:
+            self.koleskab = [x for x in self.koleskab if x["id"] not in ids]
+            self._log(user, "koleskab", "tog " + _names([x["navn"] for x in ud]) + " ud af køleskabet")
+            self._save()
+            self._notify()
+        return {"fjernet": ud}
 
     @callback
     def skjul_ret(self, navn: str, skjul: bool = True, user: str | None = None) -> list[str]:
@@ -1641,6 +1861,7 @@ class IndkobMadplanManager:
             "stats": {k: v for k, v in self.stats.items() if k != "varer"},
             "indstillinger": self.settings(),
             "retter": self._retter_resume(),
+            "koleskab": self.koleskab_liste(),
             "historik": {**self.history.trip_overview(dt_util.now()), "mangler_pris": self.missing_price()},
             "log": [{k: v for k, v in e.items() if k not in ("k", "fra")} for e in reversed(self.log[-150:])],
         }

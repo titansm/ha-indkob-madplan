@@ -6,7 +6,7 @@
  * her; de huskes, så retten fremover fylder listen selv. "Tilføj N varer" lægger dem på
  * indkøbslisten med retmærke (retnavnet står med småt under varen).
  */
-import { esc } from "./im-common.js?v=0.12.4";
+import { esc } from "./im-common.js?v=0.12.5";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -130,6 +130,7 @@ class UgeVarer extends HTMLElement {
       ${d.har_vi_altid?.length ? `<p class="fod">Har vi altid (kommer ikke med): ${esc(d.har_vi_altid.join(", "))}.</p>` : ""}
       <details class="hvordan"><summary>ⓘ Sådan virker det</summary>
         <p>Varerne kommer fra jeres retter (Noter → Retter). <b>Kød fra fryseren</b> er fravalgt – tryk på varen, hvis I skal købe det. Varer, der allerede står på listen, eller som I har købt i denne uge, er også fravalgt.</p>
+        <p><b>Køleskabet</b> (Noter → Køleskab): rester mærket <i>Nok</i> er fravalgt (🧊 i køleskabet); rester mærket <i>Lidt</i> købes stadig, men er mærket.</p>
         <p>Retter uden varer: tryk <i>Skriv varerne</i>. Listen huskes, så retten næste gang fylder indkøbslisten selv.</p>
         <p>Varerne lægges på listen som engangsvarer med retten skrevet med småt under – så kan I se i butikken, hvad den skal bruges til.</p>
       </details>`;
@@ -193,7 +194,9 @@ class UgeVarer extends HTMLElement {
       const head = v.kategori !== sidst ? `<div class="kat">${esc(kat(v.kategori))}</div>` : "";
       sidst = v.kategori;
       const on = this._valgt(v);
-      const grund = v.grund ? `<span class="grund ${v.koed && !v.paa_listen ? "frost" : ""}">${v.koed && !v.paa_listen ? "❄ " : ""}${esc(v.grund)}</span>` : "";
+      const kol = !v.paa_listen && v.koleskab && /køleskab/.test(v.grund || ""); // 0.12.5
+      const frost = !v.paa_listen && v.koed && !kol;
+      const grund = v.grund ? `<span class="grund ${frost || kol ? "frost" : ""}">${kol ? "🧊 " : frost ? "❄ " : ""}${esc(v.grund)}</span>` : "";
       return `${head}<button class="vare ${v.paa_listen ? "paa" : ""}" data-a="vare" data-i="${i}" role="checkbox" aria-checked="${on}" ${v.paa_listen ? "disabled" : ""}>
           <span class="chk" aria-hidden="true"></span>
           <span class="vt"><span class="vn">${esc(v.tekst)}</span><small>${esc(v.retter.join(" · "))}</small></span>
