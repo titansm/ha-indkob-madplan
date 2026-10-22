@@ -19,6 +19,7 @@ from functools import lru_cache
 from typing import Any
 
 from . import kategorier
+from . import saeson as sae
 from .navne import (
     ALTID, DK_TEKST, FAMILIE_KOED_G, FAMILIE_PORTIONER, IKKE_VARE, IKKE_VARE2, KOED, KOED_STK_G, NAVNE,
     SPRING_OVER, TOERRET, VAESKER,
@@ -677,12 +678,19 @@ class Opskriftsbank:
         f = (self.egne.get(ret_id) or {}).get("fryser")
         return list(f) if isinstance(f, list) else None
 
+    def saeson(self, ret_id: str) -> list[str] | None:
+        """Jeres sæson for retten (0.12.6): liste af sæsoner, [] = hele året, None = ikke angivet (regler)."""
+        s = (self.egne.get(ret_id) or {}).get("saeson")
+        return list(s) if isinstance(s, list) else None
+
     def gem(self, ret_id: str, *, navn: str | None = None, varer: list[dict] | None | bool = False,
             opskrift: str | None | bool = False, fryser: list[str] | None | bool = False,
+            saeson: list[str] | None | bool = False,
             t: str | None = None, af: str | None = None) -> None:
         """varer: liste = gem · None = slet rettelsen (tilbage til opskriftens/ingen) · False = uændret.
         opskrift: "r:<id>" = brug den opskrifts varer · None = fjern koblingen · False = uændret.
-        fryser: liste = kød fra fryseren ([] = intet) · None = ikke angivet · False = uændret."""
+        fryser: liste = kød fra fryseren ([] = intet) · None = ikke angivet · False = uændret.
+        saeson: liste af sæsoner ([] = hele året) · None = ikke angivet (faste regler) · False = uændret."""
         if ret_id.startswith("r:") and not self.opskrift(ret_id[2:]):
             raise KeyError(ret_id)
         e = dict(self.egne.get(ret_id) or {})
@@ -705,6 +713,11 @@ class Opskriftsbank:
                 e.pop("fryser", None)
             else:
                 e["fryser"] = rens_fryser(fryser)
+        if saeson is not False:
+            if saeson is None:
+                e.pop("saeson", None)
+            else:
+                e["saeson"] = sae.rens(saeson)
         e["t"], e["af"] = t, af
         if set(e) <= {"t", "af"} or (ret_id.startswith("r:") and set(e) <= {"t", "af", "navn"}):
             self.egne.pop(ret_id, None)

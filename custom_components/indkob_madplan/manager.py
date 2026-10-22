@@ -51,6 +51,7 @@ from . import kategorier as kat
 from . import koleskab as kol
 from . import opskrifter as op
 from . import planner as pl
+from . import saeson as sae
 from .stats import History, clean_names, normalize
 
 _LOGGER = logging.getLogger(__name__)
@@ -821,6 +822,18 @@ class IndkobMadplanManager:
         key = dish_key(kanon)
         return self.bank.fryser("e:" + key) if key else None
 
+    # ------------------------------------------------------------ sæson (0.12.6)
+    def saeson_for_navn(self, navn: str) -> sae.Saeson | None:
+        """Rettens sæson: jeres egen (Retter) går forud for de faste regler. None = hele året."""
+        if not navn:
+            return None
+        kanon = pl.kanonisk(navn) or (navn[0].upper() + navn[1:])
+        key = dish_key(kanon)
+        egen = self.bank.saeson("e:" + key) if key else None
+        if egen is not None:
+            return sae.egen_saeson(egen)
+        return sae.regel_saeson(kanon)
+
     def _dag_ud(self, dag: Dag) -> dict:
         """Dagen til sensorer/kort: optøning ud fra rettens "Fra fryseren", ellers ud fra kød-ordene."""
         d = dag.as_dict(self.koed_ord, DEFAULT_REST_ORD)
@@ -993,12 +1006,25 @@ class IndkobMadplanManager:
             ],
             "forslag_varer": list(pl.RETTER.get(kanon, {}).get("varer", [])),
             "rettet_t": e.get("t"), "rettet_af": e.get("af"), "fryser": b.fryser(ret_id),
+            **self._saeson_ud(ret_id, kanon),
+        }
+
+    def _saeson_ud(self, ret_id: str, kanon: str) -> dict:
+        """Sæson til Retter (0.12.6): jeres valg + det, reglerne ville give."""
+        std = sae.regel_saeson(kanon)
+        egen = self.bank.saeson(ret_id)
+        nu = sae.egen_saeson(egen) if egen is not None else std
+        return {
+            "saeson": egen,
+            "saeson_standard": std.tekst() if std else None,
+            "saeson_tekst": nu.tekst() if nu else None,
+            "saeson_nu": round(sae.faktor(nu, dt_util.now().date()), 2),
         }
 
     @callback
     def gem_ret(self, ret_id: str | None, user: str | None = None, *, navn: str | None = None,
                 varer: list[dict] | None | bool = False, opskrift: str | None | bool = False,
-                fryser: list[str] | None | bool = False) -> dict:
+                fryser: list[str] | None | bool = False, saeson: list[str] | None | bool = False) -> dict:
         """Gem jeres indkøbsliste til en ret (eller koblingen til en opskrift). ret_id None = ny egen ret."""
         if ret_id is None:
             navn = (navn or "").strip()
@@ -1010,14 +1036,21 @@ class IndkobMadplanManager:
             ret_id = "e:" + key
             if ret_id in self.bank.egne or key in self._egne_hist():
                 navn = None  # findes allerede – gem bare varerne på den
+        if saeson is not False and not ret_id.startswith("e:"):
+            raise ValueError("Sæson kan kun sættes på jeres egne retter")
         try:
-            self.bank.gem(ret_id, navn=navn, varer=varer, opskrift=opskrift, fryser=fryser,
+            self.bank.gem(ret_id, navn=navn, varer=varer, opskrift=opskrift, fryser=fryser, saeson=saeson,
                           t=dt_util.now().isoformat(timespec="seconds"), af=user)
         except KeyError as err:
             raise ValueError("Retten eller opskriften findes ikke længere") from err
         rnavn = (op.paen_titel(self.bank.opskrift(ret_id[2:])["titel"]) if ret_id.startswith("r:")
                  else self._egen_navn(ret_id))
-        if fryser is not False and varer is False and opskrift is False:
+        if saeson is not False and varer is False and opskrift is False and fryser is False:
+            s = self.bank.saeson(ret_id)
+            tekst = (f'fjernede sæsonen fra "{rnavn}"' if s is None
+                     else f'satte "{rnavn}" til hele året' if not s
+                     else f'satte sæson på "{rnavn}": ' + ", ".join(sae.SAESONER[k][0].lower() for k in s))
+        elif fryser is not False and varer is False and opskrift is False:
             f = self.bank.fryser(ret_id)
             tekst = (f'fjernede "Fra fryseren" fra "{rnavn}"' if f is None
                      else f'satte "Fra fryseren" på "{rnavn}": ' + (" / ".join(f) if f else "intet"))
@@ -1382,7 +1415,8 @@ class IndkobMadplanManager:
         seed = seed if seed is not None else int(dt_util.now().timestamp())
         rester_kol = self._koleskab_til_plan(start)
         pl.Planlaegger(model, skjulte=set(self.planner_data.get("skjulte", [])), seed=seed,
-                       koleskab=rester_kol, rester_for=self._rester_for(rester_kol) if rester_kol else None).planlaeg(
+                       koleskab=rester_kol, rester_for=self._rester_for(rester_kol) if rester_kol else None,
+                       saeson_for=self.saeson_for_navn).planlaeg(
             plan, antal_nye=max(0, min(2, nye)), rester=rester
         )
         return self._plan_svar(model, plan, start, dage, seed)

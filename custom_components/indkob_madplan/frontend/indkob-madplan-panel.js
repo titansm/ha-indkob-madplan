@@ -2,11 +2,11 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.12.5";
-import "./im-planner.js?v=0.12.5";
-import "./im-retter.js?v=0.12.5";
-import "./im-ugevarer.js?v=0.12.5";
-import "./im-koleskab.js?v=0.12.5";
+} from "./im-common.js?v=0.12.6";
+import "./im-planner.js?v=0.12.6";
+import "./im-retter.js?v=0.12.6";
+import "./im-ugevarer.js?v=0.12.6";
+import "./im-koleskab.js?v=0.12.6";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },

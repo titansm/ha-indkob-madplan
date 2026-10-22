@@ -11,7 +11,7 @@
  * Hændelse `koleskab-aendret` (bubbles, composed) efter hver ændring – planlæggeren laver så
  * et nyt bud på de dage, I ikke selv har valgt.
  */
-import { esc } from "./im-common.js?v=0.12.5";
+import { esc } from "./im-common.js?v=0.12.6";
 
 const KORT = { Mandag: "man.", Tirsdag: "tirs.", Onsdag: "ons.", Torsdag: "tors.", Fredag: "fre.", "Lørdag": "lør.", "Søndag": "søn." };
 const lf = (s) => (s && !/^[A-ZÆØÅ]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");

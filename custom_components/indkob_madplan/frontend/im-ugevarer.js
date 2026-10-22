@@ -6,7 +6,7 @@
  * her; de huskes, så retten fremover fylder listen selv. "Tilføj N varer" lægger dem på
  * indkøbslisten med retmærke (retnavnet står med småt under varen).
  */
-import { esc } from "./im-common.js?v=0.12.5";
+import { esc } from "./im-common.js?v=0.12.6";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];

@@ -7,7 +7,7 @@
  * Elementerne har ingen egen shadow-root: de tegnes inde i panelets, så panelets typografi og
  * Indstillinger-kortene (.kort/.felt) gælder. Derfor bruges ingen data-act/data-set/data-note her.
  */
-import { esc, lsGet, lsSet } from "./im-common.js?v=0.12.5";
+import { esc, lsGet, lsSet } from "./im-common.js?v=0.12.6";
 
 const ENHEDER = ["", "g", "kg", "ml", "dl", "l", "stk", "tsk", "spsk", "fed", "dåse", "pakke", "bundt", "glas", "flaske", "knivspids"];
 const MDR = ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "dec."];
@@ -28,6 +28,10 @@ const parseTal = (t) => {
   return isFinite(v) && v > 0 ? v : NaN;
 };
 const gangeTekst = (n) => `${n} ${n === 1 ? "gang" : "gange"}`;
+// Sæson (0.12.6): samme nøgler som saeson.py
+const SAESONER = [["foraar", "Forår", "mar–maj"], ["sommer", "Sommer", "jun–aug"], ["efteraar", "Efterår", "sep–nov"], ["vinter", "Vinter", "dec–feb"]];
+const saesonNavn = (k) => (SAESONER.find((x) => x[0] === k) || [k, k])[1];
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 const emit = (el, name, detail) => el.dispatchEvent(new CustomEvent(name, { detail, bubbles: true, composed: true }));
 
 /* ====================================================================== Retter */
@@ -305,6 +309,36 @@ class ImRetter extends HTMLElement {
       s.mode = "vis";
       return this._renderArk();
     }
+    // sæson (0.12.6): s.se = null (standard) | [] (hele året) | ["efteraar", …]
+    if (act === "saeson") {
+      s.mode = "saeson";
+      s.se = s.d?.saeson == null ? null : [...s.d.saeson];
+      return this._renderArk();
+    }
+    if (act === "se-hele") {
+      s.se = [];
+      return this._renderArk();
+    }
+    if (act === "se-k") {
+      const k = b.dataset.k;
+      const cur = s.se || [];
+      const ny = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+      s.se = ny.length ? SAESONER.map((x) => x[0]).filter((x) => ny.includes(x)) : null;
+      if (s.se && s.se.length === SAESONER.length) s.se = []; // alle fire = hele året
+      return this._renderArk();
+    }
+    if (act === "se-std") {
+      s.se = null;
+      return this._renderArk();
+    }
+    if (act === "se-gem") {
+      const se = s.se;
+      return this._gemRaw({ ret: s.id, saeson: se }, se == null ? "Sæsonen følger standard" : !se.length ? "Gemt: hele året" : "Sæsonen er gemt");
+    }
+    if (act === "se-annuller") {
+      s.mode = "vis";
+      return this._renderArk();
+    }
   }
 
   /* ---------------------------------------------------------------- ark: vis */
@@ -354,6 +388,7 @@ class ImRetter extends HTMLElement {
     if (!s || !ark) return;
     if (s.mode === "ret" || s.mode === "ny") return this._renderRet();
     if (s.mode === "fryser") return this._renderFryser();
+    if (s.mode === "saeson") return this._renderSaeson();
     if (s.mode === "vaelg") return this._renderVaelgArk();
     const d = s.d;
     const kanRette = !!d;
@@ -434,6 +469,17 @@ class ImRetter extends HTMLElement {
           : `<div class="rt-fz">${f.map((a) => `<span class="rt-fzc">${esc(a === "intet" ? "Intet fra fryseren" : a)}</span>`).join("")}</div>
              ${f.length > 1 ? `<p class="rt-note">Planlæggeren spørger, hvilket kød det bliver.</p>` : ""}`;
       body += `<div class="rt-links"><button type="button" class="link" data-r="fryser">${f == null ? "Angiv kød fra fryseren …" : "Ret kød fra fryseren …"}</button></div>`;
+      // egen ret: sæson (0.12.6)
+      const se = d.saeson;
+      const nu = d.saeson_tekst ? (d.saeson_nu > 0 ? " · i sæson nu" : " · uden for sæson nu") : "";
+      body += `<h3 class="rt-gr">🗓 Sæson</h3>`;
+      body += se == null
+        ? `<p class="rt-note rt-se-tekst">${d.saeson_standard ? `${esc(cap(d.saeson_standard))} (standard)${nu} – foreslås ikke uden for sæsonen.` : "Hele året (standard)."}</p>`
+        : !se.length
+          ? `<p class="rt-note rt-se-tekst">Hele året (sat af jer).</p>`
+          : `<div class="rt-se">${se.map((k) => `<span class="rt-chip" aria-pressed="true">${esc(saesonNavn(k))}</span>`).join("")}</div>
+             <p class="rt-note rt-se-tekst">Foreslås kun i ${esc(d.saeson_tekst || "")}${nu}.</p>`;
+      body += `<div class="rt-links"><button type="button" class="link" data-r="saeson">${se == null ? "Angiv sæson …" : "Ret sæson …"}</button></div>`;
       // egen ret: kobling til en opskrift
       if (d.opskrift) {
         body += `<div class="rt-kobl">
@@ -505,6 +551,34 @@ class ImRetter extends HTMLElement {
         this._fzTilfoej();
       }
     });
+  }
+
+  /* ---------------------------------------------------------------- ark: sæson (0.12.6) */
+  _renderSaeson() {
+    const s = this._sheet;
+    const ark = this.querySelector("#rt-ark");
+    const se = s.se;
+    const std = s.d.saeson_standard;
+    let note;
+    if (se == null) note = std ? `Standard: ${esc(std)} – foreslås ikke uden for sæsonen.` : "Standard: hele året.";
+    else if (!se.length) note = "Foreslås hele året.";
+    else note = `Foreslås kun i ${esc(se.map((k) => saesonNavn(k).toLowerCase()).join(" og ").replace(/ og (?=.* og )/g, ", "))}.`;
+    ark.innerHTML = `<header class="rt-ah">
+        <button type="button" class="rt-hk" data-r="se-annuller">Annullér</button>
+        <span class="rt-at">${esc(s.d.navn)}</span>
+        <button type="button" class="rt-hk fed" data-r="se-gem">Gem</button>
+      </header>
+      <div class="rt-ab">
+        <h2 class="rt-titel">🗓 Sæson</h2>
+        <p class="rt-meta">Hvornår planlæggeren må foreslå retten. Uden for sæsonen foreslås den ikke – I kan stadig vælge den selv. I sæsonen kommer den lidt oftere.</p>
+        <div class="rt-se">
+          <button type="button" class="rt-chip" data-r="se-hele" aria-pressed="${se != null && !se.length}">Hele året</button>
+          ${SAESONER.map(([k, navn, mdr]) => `<button type="button" class="rt-chip" data-r="se-k" data-k="${k}" aria-pressed="${!!se?.includes(k)}">${navn} <small>${mdr}</small></button>`).join("")}
+        </div>
+        <p class="rt-note rt-se-note">${note}</p>
+        ${se != null ? `<div class="rt-links"><button type="button" class="link" data-r="se-std">Brug standard (${esc(std || "hele året")})</button></div>` : ""}
+        <p class="rt-fejl fejl" id="rt-fejl" hidden></p>
+      </div>`;
   }
 
   /* ---------------------------------------------------------------- ark: rediger */
@@ -1014,6 +1088,9 @@ const RETTER_CSS = `
   .rt-fzi { display: flex; align-items: center; gap: 8px; font-size: 15px; margin: 8px 0; }
   .rt-fzi input { width: 20px; height: 20px; accent-color: var(--im-acc); margin: 0; }
   .rt-fl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 10px; font-size: 14px; color: var(--im-dim); }
+  .rt-se { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .rt-se .rt-chip { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box; }
+  .rt-se span.rt-chip { min-height: 30px; padding: 4px 12px; font-weight: 600; }
   .rt-fl .rt-chip { border: 1px dashed var(--im-acc); background: none; color: var(--im-acc); }
   .rt-vh, .rt-vr { display: grid; grid-template-columns: 1fr 64px 76px 36px; gap: 6px; align-items: center; }
   .rt-vh { font-size: 12px; color: var(--im-dim); padding: 4px 0; }

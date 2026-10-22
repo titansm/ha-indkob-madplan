@@ -23,6 +23,8 @@ Idéen i korte træk
 5. Køleskabet (0.12.5): madvarer I har tilbage. Retter, der bruger dem, vælges først – på de
    første dage i ugen, så intet når at blive dårligt. Øvrige regler (variation, travle aftener,
    "ikke igen inden for 5 dage") gælder stadig.
+6. Sæson (0.12.6, se saeson.py): uden for sæson foreslås en ret aldrig (hokkaidosuppe om
+   sommeren), i en kantmåned halvt så ofte, i sæson lidt oftere. Retter uden sæson påvirkes ikke.
 
 Ren Python uden Home Assistant-afhængigheder, så den kan testes isoleret.
 """
@@ -37,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from statistics import median
 
+from . import saeson as sae
 from .madplan import DEFAULT_REST_ORD, UGEDAGE, Dag, dish_key
 
 # --------------------------------------------------------------------------- viden om retter
@@ -511,13 +514,23 @@ def _opremsning(navne: list[str]) -> str:
 class Planlaegger:
     def __init__(self, model: Model, *, skjulte: set[str] | None = None, seed: int | None = None,
                  koleskab: list[str] | None = None,
-                 rester_for: Callable[[str, str], list[str]] | None = None) -> None:
+                 rester_for: Callable[[str, str], list[str]] | None = None,
+                 saeson_for: Callable[[str], sae.Saeson | None] | None = None) -> None:
         self.m = model
         self.skjulte = {s.lower() for s in (skjulte or set())}
         self.rnd = random.Random(seed)
         # Køleskabet (0.12.5): restens navne + en funktion, der siger hvilke af dem en ret bruger
         self.koleskab = list(koleskab or [])
         self._rester_for = rester_for
+        # Sæson (0.12.6): rettens sæson (jeres egen fra Retter, ellers de faste regler); None = hele året
+        self._saeson_for = saeson_for or sae.regel_saeson
+        self._saeson_cache: dict[str, sae.Saeson | None] = {}
+
+    def saeson(self, navn: str) -> sae.Saeson | None:
+        """Rettens sæson (None = hele året)."""
+        if navn not in self._saeson_cache:
+            self._saeson_cache[navn] = self._saeson_for(navn)
+        return self._saeson_cache[navn]
 
     def _kol(self, navn: str, tekst: str = "") -> list[str]:
         """De rester fra køleskabet, retten bruger."""
@@ -589,6 +602,11 @@ class Planlaegger:
         egen = nyt or egenskaber(navn, None)
         p = self.m.profiler.get(nyt["ligner"] if nyt else navn)
         if p is None:
+            return None
+        # 0) sæson (0.12.6): uden for sæson foreslås retten ikke
+        saeson = self.saeson(navn)
+        sf = sae.faktor(saeson, dag.dato)
+        if sf <= 0:
             return None
         wd = dag.dato.weekday()
         grunde: list[str] = []
@@ -672,7 +690,7 @@ class Planlaegger:
                     stor = True
                     break
 
-        score = smag * rytme * uf * kf * vf
+        score = smag * rytme * uf * kf * vf * sf
         if score <= 0:
             return None
 
@@ -687,6 +705,8 @@ class Planlaegger:
             grunde.append(f"Tit på en {UGEDAGE[wd].lower()}")
         if stor:
             grunde.append("Lav dobbelt – rester til en travl aften")
+        if saeson is not None and sf > 1:
+            grunde.append(f"I sæson ({saeson.tekst()})")
         if not nyt:
             if siden_dage >= 60 and p.antal >= 2:
                 grunde.append(f"Genfundet · ikke siden {_maaned(p.sidst)}")

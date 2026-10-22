@@ -373,6 +373,7 @@ def ws_retter__hent(m: IndkobMadplanManager, msg: dict, user: str | None) -> dic
     vol.Optional("varer"): vol.Any(None, vol.All([VARE], vol.Length(max=80))),
     vol.Optional("opskrift"): vol.Any(None, RET_ID),
     vol.Optional("fryser"): vol.Any(None, vol.All([vol.All(str, vol.Length(max=60))], vol.Length(max=10))),
+    vol.Optional("saeson"): vol.Any(None, vol.All([vol.In(["foraar", "sommer", "efteraar", "vinter"])], vol.Length(max=4))),
 })
 def ws_retter__gem(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     varer = msg["varer"] if "varer" in msg else False
@@ -380,7 +381,8 @@ def ws_retter__gem(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict
         varer = [{"navn": v["navn"], "mængde": v.get("maengde"), "enhed": v.get("enhed")} for v in varer]
     return m.gem_ret(msg.get("ret"), user, navn=msg.get("navn"), varer=varer,
                      opskrift=msg["opskrift"] if "opskrift" in msg else False,
-                     fryser=msg["fryser"] if "fryser" in msg else False)
+                     fryser=msg["fryser"] if "fryser" in msg else False,
+                     saeson=msg["saeson"] if "saeson" in msg else False)
 
 
 @_ws({vol.Required("ret"): RET_ID, vol.Optional("gange", default=1): vol.All(vol.Coerce(float), vol.Range(min=0.25, max=4))})
