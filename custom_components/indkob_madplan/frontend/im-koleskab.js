@@ -10,6 +10,10 @@
  *
  * Hændelse `koleskab-aendret` (bubbles, composed) efter hver ændring – planlæggeren laver så
  * et nyt bud på de dage, I ikke selv har valgt.
+ *
+ * I planlæggeren (0.13.0) er køleskabet foldet sammen til én linje ("🧊 Køleskab · 20 varer" +
+ * hvilke ugens retter bruger); dagene viser selv 🧊. Tryk på linjen folder hele listen (Nok/Lidt, ×)
+ * og feltet ud. Noten "Køleskab" er uændret (altid hele listen).
  */
 import { esc } from "./im-common.js?v=0.13.0";
 
@@ -25,6 +29,7 @@ class ImKoleskab extends HTMLElement {
     this._planBrug = null; // planlæggerens dage: {restnavn: "fre.: kylling i karry"}
     this._busy = false;
     this._fortryd = null;
+    this._aaben = false; // planlæggeren: hele listen foldet ud (0.13.0)
     this.shadowRoot.innerHTML = `<style>${CSS}</style>
       <div class="kol">
         <div class="hoved" id="hoved"></div>
@@ -73,14 +78,31 @@ class ImKoleskab extends HTMLElement {
     const r = this.shadowRoot;
     const planner = this.hasAttribute("planner");
     const n = this._liste.length;
-    r.getElementById("hoved").innerHTML = planner
-      ? `<b>🧊 Rester i køleskabet</b><small>${n ? "Bruges først – tidligt i ugen" : "Skriv det, I har tilbage – så bruger forslagene det først"}</small>`
-      : "";
+    // 0.13.0: i planlæggeren er en ikke-tom liste foldet sammen til én linje
+    const fold = planner && n > 0;
+    const aaben = !fold || this._aaben;
+    const brugte = this._liste.filter((x) => this._erBrugt(x));
+    if (fold) {
+      const varer = `${n} ${n === 1 ? "vare" : "varer"}`;
+      const brug = brugte.length
+        ? `${brugte.length} bruges i ugen: ${esc(opremsning(brugte.map((x) => lf(x.navn))))}`
+        : "Ingen af ugens retter bruger dem";
+      r.getElementById("hoved").innerHTML = `<button type="button" class="fold" data-a="fold" aria-expanded="${aaben}">
+          <span class="ft"><b>🧊 Køleskab · ${varer}</b><small>${brug}</small></span>
+          <span class="fl">${aaben ? "Skjul" : "Vis alle"}<span class="chev" aria-hidden="true">›</span></span>
+        </button>`;
+    } else {
+      r.getElementById("hoved").innerHTML = planner
+        ? `<b>🧊 Rester i køleskabet</b><small>Skriv det, I har tilbage – så bruger forslagene det først</small>`
+        : "";
+    }
     r.getElementById("hoved").hidden = !planner;
+    r.getElementById("tilf").hidden = !aaben;
     r.getElementById("tom").textContent = n ? "" : planner ? "" : "Intet i køleskabet. Skriv det, I har tilbage – fx en halv pakke fløde eller lidt champignon.";
     r.getElementById("tom").hidden = !!n || planner;
-    r.getElementById("hint").hidden = !n;
-    r.getElementById("rester").innerHTML = this._liste.map((x) => this._raekke(x)).join("");
+    r.getElementById("hint").hidden = !n || !aaben;
+    r.getElementById("rester").innerHTML = aaben ? this._liste.map((x) => this._raekke(x)).join("") : "";
+    r.getElementById("rester").hidden = !aaben;
   }
 
   _brugTekst(x) {
@@ -159,6 +181,7 @@ class ImKoleskab extends HTMLElement {
     const inp = this.shadowRoot.getElementById("ny");
     const v = inp.value.trim();
     if (!v || this._busy || !this.store) return;
+    this._aaben = true; // man er i gang med at skrive rester – listen bliver foldet ud
     try {
       const res = await this._send("koleskab/tilfoej", { navne: [v] });
       inp.value = "";
@@ -179,6 +202,12 @@ class ImKoleskab extends HTMLElement {
     const b = e.target.closest("[data-a]");
     if (!b) return;
     const a = b.dataset.a;
+    if (a === "fold") {
+      this._aaben = !this._aaben;
+      this._render();
+      if (this._aaben) this.shadowRoot.getElementById("ny")?.focus({ preventScroll: true });
+      return;
+    }
     if (a === "fortryd") {
       const f = this._fortryd;
       this._fortryd = null;
@@ -242,6 +271,13 @@ const CSS = `
   .hoved { display: flex; flex-direction: column; gap: 1px; }
   .hoved b { font-size: 15px; }
   .hoved small { font-size: 13px; color: var(--im-dim); }
+  .fold { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; text-align: left; }
+  .fold .ft { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .fold .ft b { font-size: 15px; }
+  .fold .ft small { font-size: 13px; color: var(--im-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fold .fl { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 14px; font-weight: 600; color: var(--im-acc); }
+  .fold .chev { display: inline-block; font-size: 20px; line-height: 1; transition: transform .15s; }
+  .fold[aria-expanded="true"] .chev { transform: rotate(90deg); }
   .tilf { display: flex; gap: 8px; align-items: center; }
   #ny { flex: 1; min-width: 0; box-sizing: border-box; font: inherit; font-size: 16px; padding: 10px 12px; border-radius: 10px;
         border: 0; background: var(--im-bg2); color: var(--im-text); -webkit-appearance: none; }
