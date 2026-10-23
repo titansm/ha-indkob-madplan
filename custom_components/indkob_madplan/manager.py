@@ -115,6 +115,7 @@ class IndkobMadplanManager:
         self.bank = op.Opskriftsbank()
         self._egne_cache: tuple | None = None
         self._katalog_cache: tuple | None = None
+        self._ophist_cache: tuple | None = None
         self._bank_dirty = False
         # Køleskabet (0.12.5): [{"id", "navn", "nok", "t", "af"}] – nok = købes ikke, ellers "lidt" (købes stadig)
         self.koleskab: list[dict] = []
@@ -1014,6 +1015,44 @@ class IndkobMadplanManager:
         self._egne_cache = (nøgle, out)
         return out
 
+    def _opskrift_hist(self) -> tuple[dict[str, dict], dict[str, dict]]:
+        """0.14.0: hvor ofte I spiser hvad – hver aften tæller én gang.
+
+        En aften tæller på ReciMe-opskriften, når den peger på opskriften (samme regel som Varer til
+        ugen), ellers på jeres egen ret. Første dict: opskrift-id -> antal, sidst. Andet: egen ret-nøgle
+        -> antal, sidst for de aftener, der ikke tæller på en opskrift (nøgler uden sådanne aftener mangler).
+        """
+        today = dt_util.now().date()
+        nøgle = (self.bank.version, self.madplan_note.version, today)
+        cache = getattr(self, "_ophist_cache", None)
+        if cache and cache[0] == nøgle:
+            return cache[1]
+        out: dict[str, dict] = {}
+        egne: dict[str, dict] = {}
+        try:
+            aftener = pl.laes_historik(self.madplan)
+        except Exception:  # noqa: BLE001
+            aftener = []
+        for a in aftener:
+            if a.slags != "ret" or a.dato > today:
+                continue
+            key = dish_key(a.navn)
+            try:
+                rid, _navn, kilde = self._ret_for_dag(a)
+            except Exception:  # noqa: BLE001
+                rid, kilde = None, None
+            if kilde == "opskrift" and rid:
+                it = out.setdefault(rid, {"antal": 0, "sidst": None})
+            elif key:
+                it = egne.setdefault(key, {"antal": 0, "sidst": None})
+            else:
+                continue
+            it["antal"] += 1
+            it["sidst"] = a.dato.isoformat()
+        res = (out, egne)
+        self._ophist_cache = (nøgle, res)
+        return res
+
     def _egen_navn(self, eid: str) -> str:
         e = self.bank.egne.get(eid) or {}
         h = self._egne_hist().get(eid[2:])
@@ -1028,21 +1067,28 @@ class IndkobMadplanManager:
         b = self.bank
         items: list[dict] = []
         kogeb: Counter = Counter()
+        ophist, egne_rest = self._opskrift_hist()
         for r in b.raa:
             rid = "r:" + r["id"]
             varer = b.varer(rid)
+            oh = ophist.get(rid) or {}
             for kb in r["kogeboger"]:
                 kogeb[kb] += 1
             items.append({
                 "id": rid, "type": "opskrift", "navn": op.paen_titel(r["titel"]), "kogeboger": r["kogeboger"],
                 "billede": op.billede_url(r["billede"]), "tid": r["tid"]["total"] or None,
                 "antal_varer": len(varer or []), "har_varer": bool(varer), "rettet": "varer" in b.egne.get(rid, {}),
-                "gange": 0, "sidst": None, "soeg": " ".join(v["navn"].lower() for v in varer or []),
+                "gange": oh.get("antal", 0), "sidst": oh.get("sidst"),
+                "soeg": " ".join(v["navn"].lower() for v in varer or []),
             })
         hist = self._egne_hist()
-        ids = ["e:" + k for k in hist] + [i for i in b.egne if i.startswith("e:") and i[2:] not in hist]
+        # ReciMe-retter, I har spist, står under opskriften – ikke også som en tom egen ret
+        ids = ["e:" + k for k in hist
+               if k in egne_rest or ("e:" + k) in b.egne or not hist[k].get("antal")]
+        ids += [i for i in b.egne if i.startswith("e:") and i[2:] not in hist]
         for eid in ids:
             h = hist.get(eid[2:]) or {}
+            h = {**h, **(egne_rest.get(eid[2:]) or {"antal": 0, "sidst": None})}
             e = b.egne.get(eid) or {}
             varer = b.varer(eid)
             link = b.opskrift(e["opskrift"][2:]) if e.get("opskrift") else None
@@ -1090,6 +1136,8 @@ class IndkobMadplanManager:
                 "har_vi_altid": k["har_vi_altid"], "ikke_tolket": k["ikke_tolket"],
                 "original": [op.original_tekst(ln) for ln in r["linjer"]],
                 "rettet_t": e.get("t"), "rettet_af": e.get("af"), "fryser": b.fryser(ret_id),
+                "gange": (self._opskrift_hist()[0].get(ret_id) or {}).get("antal", 0),
+                "sidst": (self._opskrift_hist()[0].get(ret_id) or {}).get("sidst"),
             }
         if not ret_id.startswith("e:"):
             raise ValueError("Ukendt ret")
@@ -1098,6 +1146,7 @@ class IndkobMadplanManager:
         if not h and not e:
             raise ValueError("Retten findes ikke længere")
         navn = e.get("navn") or h.get("navn") or ret_id[2:]
+        h = {**h, **(self._opskrift_hist()[1].get(ret_id[2:]) or {"antal": 0, "sidst": None})}
         varer = b.varer(ret_id) or []
         link = None
         if e.get("opskrift") and (lr := b.opskrift(e["opskrift"][2:])):

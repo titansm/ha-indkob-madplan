@@ -197,6 +197,7 @@ class ImRetter extends HTMLElement {
       meta.push(r.gange ? `Spist ${gangeTekst(r.gange)}${r.sidst ? ", sidst " + kortDato(r.sidst) : ""}` : "Egen ret");
       if (r.opskrift) meta.push("med opskrift");
     } else {
+      if (r.gange) meta.push(`Spist ${gangeTekst(r.gange)}${r.sidst ? ", sidst " + kortDato(r.sidst) : ""}`);
       if (r.kogeboger.length) meta.push(esc(r.kogeboger.join(", ")));
       if (r.tid) meta.push(`${r.tid} min`);
     }
@@ -411,6 +412,7 @@ class ImRetter extends HTMLElement {
     body += `<h2 class="rt-titel">${esc(d.navn)}</h2>`;
     const meta = [];
     if (d.type === "opskrift") {
+      if (d.gange) meta.push(`Spist ${gangeTekst(d.gange)}${d.sidst ? ", sidst " + kortDato(d.sidst) : ""}`);
       if (d.kogeboger?.length) meta.push(esc(d.kogeboger.join(", ")));
       if (d.tid?.total) meta.push(`${d.tid.total} min`);
       if (d.portioner) meta.push(`opskriften er til ${d.portioner}`);
