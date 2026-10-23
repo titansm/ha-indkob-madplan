@@ -49,6 +49,7 @@ from .madplan import (
 from .notes import TYPE_ITEM, ShoppingNote, TextNote, new_id
 from . import kategorier as kat
 from . import koleskab as kol
+from . import opskrift_retter as orr
 from . import opskrifter as op
 from . import planner as pl
 from . import saeson as sae
@@ -1225,6 +1226,13 @@ class IndkobMadplanManager:
     def _ret_for_dag(self, a: pl.Aften) -> tuple[str | None, str, str | None]:
         """(ret-id, navn, kilde) for en aften: jeres egen ret, ellers en opskrift med samme navn."""
         eid = "e:" + dish_key(a.navn)
+        # 0.14.0: står opskriftens navn præcis som i planlæggeren ("greek chicken meatballs"), er det
+        # opskriften – også når navnet ligner en af jeres egne retter (her kødboller i tomatsauce).
+        # Hedder jeres egen ret det samme som opskriften og har sin egen liste (fx "Frikadeller"), vinder den.
+        o = self._opskrift_for_tekst(a.original or "")
+        egen_liste = eid != "e:" and bool(self.bank.varer(eid))
+        if o is not None and self.bank.varer(o.rid) and not (egen_liste and dish_key(o.navn) == dish_key(a.navn)):
+            return o.rid, o.navn, "opskrift"
         if eid != "e:" and self.bank.varer(eid):
             return eid, self._egen_navn(eid), "egen"
         bedst, score = None, 0.0
@@ -1525,7 +1533,10 @@ class IndkobMadplanManager:
         """Forslag til næste uges madplan (se planner.py)."""
         today = dt_util.now().date()
         start = start or self._plan_start()
-        model = pl.byg_model(self.madplan, today, foer=start)
+        # 0.14.0: ReciMe-opskrifterne som retter (egenskaber, sæson, nye retter)
+        alle = self._opskrift_retter()
+        kendte = {navn: o.egenskaber() for navn, o in alle.items()}
+        model = pl.byg_model(self.madplan, today, foer=start, kendte=kendte)
         dage = max(3, min(14, dage or model.blok_laengde))
         slut = start + timedelta(days=dage - 1)
         events = await self._kalender_events(start, slut)
@@ -1548,18 +1559,67 @@ class IndkobMadplanManager:
             plan.append(dp)
         seed = seed if seed is not None else int(dt_util.now().timestamp())
         rester_kol = self._koleskab_til_plan(start)
-        pl.Planlaegger(model, skjulte=set(self.planner_data.get("skjulte", [])), seed=seed,
+        skjulte = set(self.planner_data.get("skjulte", []))
+        koblede = {e["opskrift"] for e in self.bank.egne.values() if e.get("opskrift")}
+        nye_retter = orr.nye_retter(alle, model.profiler, koblede=koblede, skjulte=skjulte) if alle else None
+        pl.Planlaegger(model, skjulte=skjulte, seed=seed,
                        koleskab=rester_kol, rester_for=self._rester_for(rester_kol) if rester_kol else None,
-                       saeson_for=self.saeson_for_navn).planlaeg(
+                       saeson_for=self._saeson_for_plan(alle), nye=nye_retter, kendte=kendte).planlaeg(
             plan, antal_nye=max(0, min(2, nye)), rester=rester
         )
-        return self._plan_svar(model, plan, start, dage, seed)
+        return self._plan_svar(model, plan, start, dage, seed, kendte=kendte, alle=alle)
 
-    def _valg_dict(self, model: pl.Model, v: pl.Valg | None) -> dict | None:
+    # ------------------------------------------------------------ ReciMe i planlæggeren (0.14.0)
+    def _opskrift_retter(self) -> dict[str, orr.OpskriftRet]:
+        """Opskrifterne som retter (kort navn -> egenskaber), regnet om når banken ændres."""
+        cache = getattr(self, "_opskr_cache", None)
+        if cache and cache[0] == self.bank.version and cache[1] is self.bank:
+            return cache[2]
+        try:
+            konv = self.bank.konverteret()
+            antal = {rid: len(k.get("varer") or []) for rid, k in konv.items()}
+            for eid, e in self.bank.egne.items():  # jeres rettede indkøbslister tæller med
+                if eid.startswith("r:") and e.get("varer") is not None:
+                    antal[eid[2:]] = len(e["varer"])
+            alle = orr.klassificer(self.bank.raa, antal)
+        except Exception:  # noqa: BLE001 – planlæggeren skal virke, selv om en opskrift driller
+            _LOGGER.exception("Kunne ikke læse opskrifterne til planlæggeren")
+            alle = {}
+        self._opskr_cache = (self.bank.version, self.bank, alle)
+        return alle
+
+    def _opskrift_for_tekst(self, tekst: str) -> orr.OpskriftRet | None:
+        """Opskriften, hvis teksten er præcis dens navn i planlæggeren (store/små bogstaver er lige meget)."""
+        t = " ".join((tekst or "").split()).casefold()
+        if not t:
+            return None
+        alle = self._opskrift_retter()
+        cache = getattr(self, "_opskr_idx", None)
+        if not cache or cache[0] is not alle:
+            cache = (alle, {n.casefold(): o for n, o in alle.items()})
+            self._opskr_idx = cache
+        return cache[1].get(t)
+
+    def _saeson_for_plan(self, alle: dict[str, orr.OpskriftRet]) -> Callable[[str], sae.Saeson | None]:
+        """Sæson til planlæggeren: jeres egen (Retter) → opskriftens → de faste regler."""
+        def f(navn: str) -> sae.Saeson | None:
+            o = alle.get(navn)
+            if o is None:
+                return self.saeson_for_navn(navn)
+            kanon = pl.kanonisk(navn) or (navn[0].upper() + navn[1:])
+            key = dish_key(kanon)
+            egen = self.bank.saeson("e:" + key) if key else None
+            if egen is None:
+                egen = self.bank.saeson(o.rid)
+            return sae.egen_saeson(egen) if egen is not None else o.saeson
+        return f
+
+    def _valg_dict(self, model: pl.Model, v: pl.Valg | None, kendte: dict | None = None,
+                   alt: bool = False) -> dict | None:
         if v is None:
             return None
         navn = v.rest_af or v.navn
-        egen = pl.egenskaber(navn)
+        egen = pl.egenskaber(navn, kendte)
         prof = model.profiler.get(v.ligner or navn)
         varianter = []
         if prof and not v.nyt and not v.rest_af:
@@ -1571,12 +1631,13 @@ class IndkobMadplanManager:
             "navn": v.navn, "rest_af": v.rest_af, "nyt": v.nyt, "ligner": v.ligner, "stor": v.stor,
             "grunde": v.grunde, "score": round(v.score, 3),
             "protein": egen["protein"], "base": egen["base"], "effort": egen["effort"],
-            "varer": [] if v.rest_af else egen.get("varer", []),
+            "varer": [] if (v.rest_af or alt) else egen.get("varer", []),  # 0.14.0: ikke på buddene (kladden)
             "antal": prof.antal if prof and not v.nyt else 0,
             "varianter": varianter,
             "tekst": pl.ret_til_madplan(v.navn),
             "fryser": None if v.rest_af else self.fryser_for_navn(v.navn),
             "koleskab": list(v.koleskab),
+            "opskrift": v.opskrift,
         }
 
     def _stor_portion(self, d: pl.DagPlan) -> bool:
@@ -1593,7 +1654,8 @@ class IndkobMadplanManager:
         eks = self.madplan.get(d.dato)
         return eks.fryser_valg.lower() if eks and eks.fryser_valg else None
 
-    def _plan_svar(self, model: pl.Model, plan: list[pl.DagPlan], start: date, dage: int, seed: int) -> dict:
+    def _plan_svar(self, model: pl.Model, plan: list[pl.DagPlan], start: date, dage: int, seed: int, *,
+                   kendte: dict | None = None, alle: dict | None = None) -> dict:
         top = sorted(model.profiler.values(), key=lambda p: -p.vaegt)[:5]
         uger = sorted({a.dato.isocalendar()[:2] for a in model.aftener})
         return {
@@ -1607,6 +1669,12 @@ class IndkobMadplanManager:
             "tags": {k: {"label": v[0], "travl": v[1], "note": model.note_tekst.get(k, v[2])} for k, v in pl.TAGS.items()},
             "retter": [p.navn for p in sorted(model.profiler.values(), key=lambda p: (-p.antal, p.navn))],
             "fryser": {p.navn: f for p in model.profiler.values() if (f := self.fryser_for_navn(p.navn))},
+            # 0.14.0: ReciMe-opskrifter til søgningen i planlæggeren (ikke babymad, bagning, dips …)
+            "opskrifter": [
+                {"navn": o.navn, "id": o.rid, "protein": o.protein, "base": o.base, "effort": o.effort}
+                for o in sorted((alle or {}).values(), key=lambda x: x.navn.lower())
+                if not set(o.kogeboger) & orr.IKKE_MAD
+            ],
             "plan": [
                 {
                     "dato": d.dato.isoformat(), "ugedag": UGEDAGE[d.dato.weekday()],
@@ -1614,8 +1682,8 @@ class IndkobMadplanManager:
                     "laast": d.laast, "eksisterende": d.eksisterende, "tekst": d.tekst,
                     "stor_portion": self._stor_portion(d),
                     "fryser_valg": self._fryser_valg(d),
-                    "valg": self._valg_dict(model, d.valg),
-                    "alternativer": [self._valg_dict(model, a) for a in d.alternativer],
+                    "valg": self._valg_dict(model, d.valg, kendte),
+                    "alternativer": [self._valg_dict(model, a, kendte, alt=True) for a in d.alternativer],
                 }
                 for d in plan
             ],

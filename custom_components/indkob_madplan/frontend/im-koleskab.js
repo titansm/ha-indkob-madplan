@@ -15,7 +15,7 @@
  * hvilke ugens retter bruger); dagene viser selv 🧊. Tryk på linjen folder hele listen (Nok/Lidt, ×)
  * og feltet ud. Noten "Køleskab" er uændret (altid hele listen).
  */
-import { esc } from "./im-common.js?v=0.13.0";
+import { esc } from "./im-common.js?v=0.14.0";
 
 const KORT = { Mandag: "man.", Tirsdag: "tirs.", Onsdag: "ons.", Torsdag: "tors.", Fredag: "fre.", "Lørdag": "lør.", "Søndag": "søn." };
 const lf = (s) => (s && !/^[A-ZÆØÅ]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");

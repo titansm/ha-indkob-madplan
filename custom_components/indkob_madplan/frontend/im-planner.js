@@ -21,8 +21,8 @@
  * dem, foreslås først og lægges på de første dage. Ændres køleskabet, får de dage, I ikke selv har
  * valgt, et nyt bud (som "Bland").
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.13.0";
-import "./im-koleskab.js?v=0.13.0";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.14.0";
+import "./im-koleskab.js?v=0.14.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -75,7 +75,8 @@ class UgePlan extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this.data = null;
     this.days = [];
-    this.opts = { nye: lsGet("plan_nye", 1), rester: lsGet("plan_rester", true) };
+    // 0.14.0: nye retter fra ReciMe – standard 2 pr. uge (ny nøgle, så alle enheder starter på 2)
+    this.opts = { nye: lsGet("plan_nye2", 2), rester: lsGet("plan_rester", true) };
     this._busy = false;
     this._sheet = null; // åben dag i bund-arket
     this._kladde = null; // {tid, af} når en gemt kladde er hentet
@@ -237,7 +238,9 @@ class UgePlan extends HTMLElement {
           return d;
         });
       }
-      this.data = res;
+      // 0.14.0: planen er nu i this.days – uden en kopi i data bliver kladden halvt så stor (30 bud pr. dag)
+      const { plan: _plan, ...data } = res;
+      this.data = data;
       if (kunDag === null) this._mpVersion = this.store.state?.madplan?.version ?? null; // 0.13.0: planens grundlag
       if (kunDag === null) await this._afstem();
     } catch (e) {
@@ -470,7 +473,8 @@ class UgePlan extends HTMLElement {
         <summary>Sådan finder den forslagene</summary>
         <p>Forslagene bygger på ${d.grundlag.aftener} aftener fra jeres madplan. Retter I spiser tit, vægter mest – men kun når det er ved at være tid igen: hver ret har sin egen rytme (pita ca. hver 10. aften, lasagne sjældnere), og en ret I lige har haft, venter.</p>
         <p>Vaner på ugedage tæller med (burger om fredagen), og på travle aftener – nattevagt, fodbold, én voksen – vælges nemme retter, eller rester fra en dobbelt portion dagen før. Der er variation i kød og tilbehør, og der er lidt tilfældighed, så ugerne ikke bliver ens.</p>
-        <p>Nye retter ligner altid noget, I allerede kan lide. Tryk på en ret for flere bud, og vælg "Vis ikke igen" for retter, I er færdige med.</p>
+        <p>Nye retter kommer fra jeres opskrifter i ReciMe – kun aftensmad, der ligner noget, I allerede kan lide, og som er børnevenlig (ikke for stærk, ikke for meget grønt). Vælges en, kommer opskriftens varer med i "Varer til ugen".</p>
+        <p>"Andet bud" giver op til 30 forskellige bud pr. dag – de bedste oftest først, en ReciMe-ret ca. hvert 4. bud, og ikke de samme forrest hver dag. Tryk på en ret for at se alle bud eller søge i jeres retter og ReciMe, og vælg "Foreslå ikke igen" for retter, I er færdige med.</p>
         <p>Portion: tryk på retten og vælg Normal eller Dobbelt. Dobbelt kan være uden en bestemt dag (fryser/frokost) eller med rester på en af de næste dage.</p>
         <p>Kød fra fryseren: kan en ret laves med flere slags kød (fx burger), vælger I under retten, hvilket det bliver – så siger påmindelsen om at tage kød op det rigtige.</p>
         <p>Køleskabet: retter, der bruger det, I har tilbage, foreslås først og lægges på de første dage, så intet bliver dårligt. Retten skal have en indkøbsliste (Noter → Retter) eller være en af planlæggerens kendte retter. Ændrer I køleskabet, får de dage, I ikke selv har valgt, et nyt bud.</p>
@@ -529,7 +533,8 @@ class UgePlan extends HTMLElement {
     const aktive = TAG_ORDEN.filter((t) => day.tags.includes(t) && t !== "ude");
     const erStor = this._erDobbelt(i);
     const badges = [];
-    if (v?.nyt) badges.push(`<span class="badge nyt">Nyt</span>`);
+    if (v?.nyt) badges.push(`<span class="badge nyt">${v.opskrift ? "Ny fra ReciMe" : "Nyt"}</span>`);
+    else if (v?.opskrift && !v.rest_af) badges.push(`<span class="badge op">ReciMe</span>`);
     if (v?.rest_af) badges.push(`<span class="badge rest">Rester</span>`);
     if (v?.koleskab?.length && !ude) badges.push(`<span class="badge kol">🧊 Køleskab</span>`);
     if (erStor) badges.push(`<span class="badge stor">Lav dobbelt portion</span>`);
@@ -628,7 +633,7 @@ class UgePlan extends HTMLElement {
         <h3>${esc(day.ugedag)} ${kortDato(day.dato)}</h3>
         <button class="tl" data-a="luk-sheet">Færdig</button>
       </div>
-      <input id="sog" type="search" placeholder="Søg i jeres retter eller skriv en ny …" autocomplete="off" enterkeyhint="done" aria-label="Søg eller skriv en ret" />
+      <input id="sog" type="search" placeholder="Søg i jeres retter og ReciMe – eller skriv en ny …" autocomplete="off" enterkeyhint="done" aria-label="Søg eller skriv en ret" />
       <div class="alts" id="alts">${this._altsHTML(day, brugt)}</div>
       ${this._portionHTML(i)}
       <div class="ekstra">
@@ -676,7 +681,13 @@ class UgePlan extends HTMLElement {
     if (q) {
       const navne = (this.data.retter || []).filter((n) => n.toLowerCase().includes(q)).slice(0, 8);
       const rows = navne.map((n) => `<button class="alt" data-a="valg-navn" data-navn="${esc(n)}"><span class="an">${esc(n)}</span>${brugt.has(n.toLowerCase()) ? `<span class="ag">Er allerede med i ugen</span>` : ""}</button>`);
-      if (!navne.some((n) => n.toLowerCase() === q)) {
+      // 0.14.0: også jeres ReciMe-opskrifter
+      const egne = new Set(navne.map((n) => n.toLowerCase()));
+      const ops = (this.data.opskrifter || []).filter((o) => o.navn.toLowerCase().includes(q) && !egne.has(o.navn.toLowerCase())).slice(0, 8);
+      for (const o of ops) {
+        rows.push(`<button class="alt" data-a="valg-navn" data-navn="${esc(o.navn)}" data-op="${esc(o.id)}"><span class="an">${o.protein ? `${PROTEIN[o.protein] || ""} ` : ""}${esc(o.navn)}<span class="badge op">ReciMe</span></span>${brugt.has(o.navn.toLowerCase()) ? `<span class="ag">Er allerede med i ugen</span>` : ""}</button>`);
+      }
+      if (!navne.some((n) => n.toLowerCase() === q) && !ops.some((o) => o.navn.toLowerCase() === q)) {
         rows.push(`<button class="alt fri" data-a="valg-fri"><span class="an">Brug "${esc(this._sog.trim())}"</span><span class="ag">Skriv retten ind som den er</span></button>`);
       }
       return rows.join("");
@@ -689,7 +700,7 @@ class UgePlan extends HTMLElement {
     return list.map((a, k) => `
       <button class="alt ${a._cur ? "cur" : ""}" data-a="valg-alt" data-k="${a._cur ? -1 : day.alts.indexOf(a)}">
         <span class="an">${a.protein && !a.rest_af ? `${PROTEIN[a.protein] || ""} ` : ""}${esc(a.rest_af ? `${a.rest_af} – rester` : a.navn)}
-          ${a.nyt ? `<span class="badge nyt">Nyt</span>` : ""}${a.rest_af ? `<span class="badge rest">Rester</span>` : ""}${a._cur ? `<span class="flueben" aria-label="valgt">✓</span>` : ""}</span>
+          ${a.nyt ? `<span class="badge nyt">${a.opskrift ? "Ny fra ReciMe" : "Nyt"}</span>` : a.opskrift && !a.rest_af ? `<span class="badge op">ReciMe</span>` : ""}${a.rest_af ? `<span class="badge rest">Rester</span>` : ""}${a._cur ? `<span class="flueben" aria-label="valgt">✓</span>` : ""}</span>
         ${a.grunde?.length ? `<span class="ag">${esc(a.grunde.join(" · "))}</span>` : ""}
       </button>`).join("");
   }
@@ -722,8 +733,19 @@ class UgePlan extends HTMLElement {
     if (!t || this._sheet === null) return;
     const kendt = (this.data.retter || []).find((n) => n.toLowerCase() === t.toLowerCase());
     const k = this._sheet;
+    const o = !kendt && (this.data.opskrifter || []).find((x) => x.navn.toLowerCase() === t.toLowerCase());
+    if (o) {
+      this._lukSheet();
+      return this._vaelg(k, this._opskriftValg(o));
+    }
     this._lukSheet();
     return this._vaelg(k, { navn: kendt || t, tekst: lowerFirst(kendt || t), grunde: kendt ? ["Valgt af jer"] : ["Skrevet ind af jer"], varer: [] });
+  }
+
+  /* 0.14.0: en ReciMe-opskrift valgt i søgningen – skrives i madplanen med opskriftens navn */
+  _opskriftValg(o) {
+    return { navn: o.navn, tekst: lowerFirst(o.navn), grunde: ["Fra ReciMe · valgt af jer"], varer: [],
+      opskrift: o.id, protein: o.protein, base: o.base, effort: o.effort };
   }
 
   /* ------------------------------------------------------------ gem */
@@ -834,7 +856,7 @@ class UgePlan extends HTMLElement {
       }
       case "nye":
         this.opts.nye = Number(b.dataset.n);
-        lsSet("plan_nye", this.opts.nye);
+        lsSet("plan_nye2", this.opts.nye);
         return this._bland();
       case "rester":
         this.opts.rester = b.checked;
@@ -919,8 +941,9 @@ class UgePlan extends HTMLElement {
         const navn = b.dataset.navn;
         const k2 = this._sheet;
         const alt = this.days[k2].alts.find((x) => x.navn === navn);
+        const o = !alt && b.dataset.op ? (this.data.opskrifter || []).find((x) => x.id === b.dataset.op) : null;
         this._lukSheet();
-        return this._vaelg(k2, alt || { navn, tekst: lowerFirst(navn), grunde: ["Valgt af jer"], varer: [] });
+        return this._vaelg(k2, alt || (o ? this._opskriftValg(o) : { navn, tekst: lowerFirst(navn), grunde: ["Valgt af jer"], varer: [] }));
       }
       case "valg-fri":
         return this._brugSoegning();
@@ -1073,6 +1096,8 @@ const CSS = `
   .badge.stor { background: color-mix(in srgb, var(--im-acc-strong) 22%, transparent); color: var(--im-text); }
   .badge.ek { background: var(--im-bg2); color: var(--im-dim); }
   .badge.kol { background: var(--im-frost-bg, rgba(109,182,230,.14)); color: var(--im-frost); }
+  .badge.op { background: color-mix(in srgb, var(--im-acc) 16%, transparent); color: var(--im-acc); margin-left: 6px; vertical-align: 1px; }
+  .badges .badge.op { margin-left: 0; }
   #kol { margin: 0 0 12px; }
   .koedbesked { margin: 4px 2px 12px; padding: 10px 12px; border-radius: 12px; font-size: 14.5px; line-height: 1.4;
                 background: var(--im-frost-bg, rgba(109,182,230,.14)); color: var(--im-text); }

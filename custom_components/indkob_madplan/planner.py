@@ -25,6 +25,9 @@ Idéen i korte træk
    "ikke igen inden for 5 dage") gælder stadig.
 6. Sæson (0.12.6, se saeson.py): uden for sæson foreslås en ret aldrig (hokkaidosuppe om
    sommeren), i en kantmåned halvt så ofte, i sæson lidt oftere. Retter uden sæson påvirkes ikke.
+7. ReciMe (0.14.0, se opskrift_retter.py): nye retter kommer fra jeres egne opskrifter – kun dem,
+   der ligner noget, I spiser, og som er børnevenlige. "Andet bud" giver op til 30 forskellige bud
+   pr. dag, trukket vægtet tilfældigt (de bedste oftest først), med en ReciMe-ret ca. hvert 4. bud.
 
 Ren Python uden Home Assistant-afhængigheder, så den kan testes isoleret.
 """
@@ -377,8 +380,11 @@ class Model:
     middage: int
 
 
-def byg_model(madplan: dict[date, Dag], i_dag: date, foer: date | None = None) -> Model:
-    """Byg profilen ud fra alle dage før `foer` (standard: i dag + alt planlagt)."""
+def byg_model(madplan: dict[date, Dag], i_dag: date, foer: date | None = None,
+              kendte: dict[str, dict] | None = None) -> Model:
+    """Byg profilen ud fra alle dage før `foer` (standard: i dag + alt planlagt).
+
+    `kendte` (0.14.0): egenskaber for retter fra ReciMe (navn -> som `egenskaber()`)."""
     alle = laes_historik(madplan)
     aftener = [a for a in alle if foer is None or a.dato < foer]
     middage = [a for a in aftener if a.slags in ("ret", "rest")]
@@ -406,7 +412,7 @@ def byg_model(madplan: dict[date, Dag], i_dag: date, foer: date | None = None) -
             if a.rest_af and a.rest_af in profiler:
                 profiler[a.rest_af].rest_antal += 1
             continue
-        egen = egenskaber(a.navn)
+        egen = egenskaber(a.navn, kendte)
         p = profiler.setdefault(a.navn, Profil(a.navn, egen))
         p.antal += 1
         p.vaegt += w(a.dato)
@@ -487,6 +493,7 @@ class Valg:
     rest_af: str | None = None
     stor: bool = False
     koleskab: list[str] = field(default_factory=list)  # rester fra køleskabet, retten bruger (0.12.5)
+    opskrift: str | None = None  # "r:<id>" når retten er en ReciMe-opskrift (0.14.0)
 
 
 @dataclass
@@ -504,6 +511,14 @@ class DagPlan:
 
 # Køleskabet: på en travl aften kun en nem ret med resterne – eller en, der er mindst så god som dagens bedste bud
 KOL_MIN_ANDEL_TRAVL = 0.25
+# "Andet bud" (0.14.0): så mange bud pr. dag, heraf højst så mange nye retter; en ny ret ca. hvert N. bud
+ALT_MAKS = 30
+ALT_NYE_MAKS = 8
+ALT_NY_HVERT = 4
+ALT_FORREST = 7  # de første bud på en dag – vist igen næste dag trækker ned med faktoren
+ALT_VIST_FAKTOR = 0.35
+# Når en ny ret skal på planen: lodtrækning blandt så mange af de bedste (faste NYE: 4)
+NY_TRAEK_RECIME = 10
 
 
 def _opremsning(navne: list[str]) -> str:
@@ -515,8 +530,16 @@ class Planlaegger:
     def __init__(self, model: Model, *, skjulte: set[str] | None = None, seed: int | None = None,
                  koleskab: list[str] | None = None,
                  rester_for: Callable[[str, str], list[str]] | None = None,
-                 saeson_for: Callable[[str], sae.Saeson | None] | None = None) -> None:
+                 saeson_for: Callable[[str], sae.Saeson | None] | None = None,
+                 nye: list[dict] | None = None, kendte: dict[str, dict] | None = None) -> None:
         self.m = model
+        # Nye retter (0.14.0): fra ReciMe (opskrift_retter.nye_retter) – ellers de faste NYE
+        self.recime = nye is not None
+        self.nye: list[dict] = list(nye) if nye is not None else NYE
+        self.kendte: dict[str, dict] = dict(kendte or {})
+        for n in self.nye:
+            self.kendte.setdefault(n["navn"], n)
+        self._vist: dict[str, int] = {}  # 0.14.0: retter, der stod forrest i "Andet bud" på en tidligere dag
         self.skjulte = {s.lower() for s in (skjulte or set())}
         self.rnd = random.Random(seed)
         # Køleskabet (0.12.5): restens navne + en funktion, der siger hvilke af dem en ret bruger
@@ -525,6 +548,10 @@ class Planlaegger:
         # Sæson (0.12.6): rettens sæson (jeres egen fra Retter, ellers de faste regler); None = hele året
         self._saeson_for = saeson_for or sae.regel_saeson
         self._saeson_cache: dict[str, sae.Saeson | None] = {}
+
+    def _eg(self, navn: str) -> dict:
+        """Rettens egenskaber – også for ReciMe-retter."""
+        return egenskaber(navn, self.kendte)
 
     def saeson(self, navn: str) -> sae.Saeson | None:
         """Rettens sæson (None = hele året)."""
@@ -555,7 +582,7 @@ class Planlaegger:
         med = [(k, len(set(k.koleskab) & mangler)) for k in kand if set(k.koleskab) & mangler]
         if travl:
             med = [(k, n) for k, n in med
-                   if egenskaber(k.navn)["effort"] == 1 or k.score >= bedst * KOL_MIN_ANDEL_TRAVL]
+                   if self._eg(k.navn)["effort"] == 1 or k.score >= bedst * KOL_MIN_ANDEL_TRAVL]
         if not med:
             return None
         med.sort(key=lambda x: -(x[0].score * x[1]))
@@ -599,7 +626,7 @@ class Planlaegger:
     def _vurder(self, navn: str, dag: DagPlan, plan: list[DagPlan], i: int, nyt: dict | None = None) -> Valg | None:
         if navn.lower() in self.skjulte:
             return None
-        egen = nyt or egenskaber(navn, None)
+        egen = nyt or self._eg(navn)
         p = self.m.profiler.get(nyt["ligner"] if nyt else navn)
         if p is None:
             return None
@@ -614,6 +641,8 @@ class Planlaegger:
         # 1) smag
         if nyt:
             smag = (p.vaegt + 0.1 * p.antal) ** 0.7 * 0.55
+            if nyt.get("opskrift"):
+                smag *= max(0.3, float(nyt.get("kids", 1.0)))  # børnevenlig trækker op
         else:
             smag = (p.vaegt + 0.1 * p.antal) ** 0.7
 
@@ -656,10 +685,10 @@ class Planlaegger:
         navne = {x.valg.navn for x in brugt} | {x.valg.rest_af for x in brugt if x.valg.rest_af}
         if navn in navne:
             return None
-        fam_brugt = [egenskaber(x.valg.navn)["fam"] for x in brugt if not x.valg.rest_af]
+        fam_brugt = [self._eg(x.valg.navn)["fam"] for x in brugt if not x.valg.rest_af]
         if egen["fam"] in fam_brugt:
             vf *= 0.15
-        prot_brugt = [egenskaber(x.valg.navn)["protein"] for x in brugt if not x.valg.rest_af]
+        prot_brugt = [self._eg(x.valg.navn)["protein"] for x in brugt if not x.valg.rest_af]
         n_dage = len(plan)
         maks = math.ceil(self.m.protein_andel.get(egen["protein"], 0.1) * n_dage + 0.8)
         over = prot_brugt.count(egen["protein"]) + 1 - maks
@@ -668,14 +697,14 @@ class Planlaegger:
         # nabodage (inkl. sidste dage af den forrige plan)
         naboer = self._naboer(dag.dato, plan)
         for nb in naboer:
-            ne = egenskaber(nb)
+            ne = self._eg(nb)
             if ne["protein"] == egen["protein"] and egen["protein"] not in ("blandet", "andet"):
                 vf *= 0.6
             if ne["base"] == egen["base"]:
                 vf *= 0.65
             if ne["fam"] == egen["fam"]:
                 vf *= 0.3
-        baser = [egenskaber(x.valg.navn)["base"] for x in brugt if not x.valg.rest_af]
+        baser = [self._eg(x.valg.navn)["base"] for x in brugt if not x.valg.rest_af]
         if egen["base"] == "pasta" and baser.count("pasta") >= 2:
             vf *= 0.35
         if egen["base"] == "brød" and baser.count("brød") >= 2:
@@ -695,7 +724,9 @@ class Planlaegger:
             return None
 
         # Grunde (vises under retten)
-        if nyt:
+        if nyt and nyt.get("opskrift"):
+            grunde.append(f"Fra ReciMe · minder om {nyt['ligner'][0].lower() + nyt['ligner'][1:]} ({p.antal}×)")
+        elif nyt:
             grunde.append(f"Minder om {nyt['ligner'][0].lower() + nyt['ligner'][1:]}, som I har fået {p.antal} gange")
         if travl and e == 1:
             grunde.append("Nem aften")
@@ -717,7 +748,8 @@ class Planlaegger:
         kol = self._kol(navn)
         if kol:
             grunde.insert(0, f"Bruger {_opremsning(kol)} fra køleskabet")
-        return Valg(navn, score, grunde[:2], bool(nyt), nyt["ligner"] if nyt else None, None, stor, kol)
+        return Valg(navn, score, grunde[:2], bool(nyt), nyt["ligner"] if nyt else None, None, stor, kol,
+                    (nyt or {}).get("opskrift") or self.kendte.get(navn, {}).get("opskrift"))
 
     def _naboer(self, dato: date, plan: list[DagPlan]) -> list[str]:
         """Retter dagen før og dagen efter (fra planen eller historikken)."""
@@ -727,7 +759,7 @@ class Planlaegger:
             hit = next((x for x in plan if x.dato == d), None)
             if hit and hit.valg:
                 navn = hit.valg.rest_af or hit.valg.navn
-                if navn in self.m.profiler or navn in RETTER or any(n["navn"] == navn for n in NYE):
+                if navn in self.m.profiler or navn in RETTER or navn in self.kendte:
                     out.append(navn)
             elif hit is None and delta == -1:
                 h = next((a for a in reversed(self.m.aftener) if a.dato == d and a.slags == "ret"), None)
@@ -750,7 +782,7 @@ class Planlaegger:
     def _nye_kandidater(self, dag: DagPlan, plan: list[DagPlan], i: int) -> list[Valg]:
         kendte = {dish_key(n) for n in self.m.profiler}
         out = []
-        for ny in NYE:
+        for ny in self.nye:
             if dish_key(ny["navn"]) in kendte or ny["ligner"] not in self.m.profiler:
                 continue
             if kanonisk(ny["navn"]) and kanonisk(ny["navn"]) in self.m.profiler and kanonisk(ny["navn"]) != ny["ligner"]:
@@ -814,7 +846,7 @@ class Planlaegger:
             if ny_dag:
                 nye = [k for k in kand if k.nyt]
                 if nye:
-                    d.valg = self._traek(nye[:4])
+                    d.valg = self._traek(nye[:NY_TRAEK_RECIME if self.recime else 4])
                     nye_brugt += 1
                     continue
             kand = [k for k in kand if not k.nyt]
@@ -832,7 +864,7 @@ class Planlaegger:
 
     def _kendt_navn(self, tekst: str) -> str | None:
         t = tekst.strip().lower()
-        for navn in list(self.m.profiler) + list(RETTER) + [n["navn"] for n in NYE]:
+        for navn in list(self.m.profiler) + list(RETTER) + [n["navn"] for n in self.nye] + list(self.kendte):
             if navn.lower() == t:
                 return navn
         return kanonisk(tekst)
@@ -846,12 +878,20 @@ class Planlaegger:
         kol = self._kol(navn or tekst.strip(), tekst)
         grunde = [f"Bruger {_opremsning(kol)} fra køleskabet"] if kol else []
         if navn:
-            ny = next((n for n in NYE if n["navn"] == navn), None)
+            ny = next((n for n in self.nye if n["navn"] == navn), None)
             return Valg(navn, 0, grunde, nyt=bool(ny), ligner=ny["ligner"] if ny else None,
-                        stor=bool(egenskaber(navn).get("stor")), koleskab=kol)
+                        stor=bool(self._eg(navn).get("stor")), koleskab=kol,
+                        opskrift=self.kendte.get(navn, {}).get("opskrift"))
         return Valg(tekst.strip(), 0, grunde, koleskab=kol)
 
-    def alternativer(self, plan: list[DagPlan], i: int, n: int = 8) -> list[Valg]:
+    def alternativer(self, plan: list[DagPlan], i: int, n: int = ALT_MAKS) -> list[Valg]:
+        """Bud til "Andet bud" og forslagsarket.
+
+        0.14.0: op til `n` forskellige bud (før: de 8 bedste i fast rækkefølge, som "Andet bud"
+        kørte i ring imellem). Jeres egne retter trækkes vægtet tilfældigt efter point – de bedste
+        kommer oftest først, men ikke i samme rækkefølge hver dag. Nye retter (ReciMe) flettes ind
+        ca. hvert 4. bud (højst 8 pr. dag; med de faste NYE højst 2 som før).
+        """
         d = plan[i]
         gemt = d.valg
         d.valg = None
@@ -868,20 +908,30 @@ class Planlaegger:
             kilde = self._rest_kilde(plan, i)
             if kilde and not (gemt and gemt.rest_af):
                 out.append(self._rest_valg(kilde, plan, i))
-        nye_med = 0
-        for k in kand:
-            if gemt and k.navn == gemt.navn:
-                continue
-            if any(o.navn == k.navn for o in out):
-                continue
-            if k.nyt:
-                if nye_med >= 2:
-                    continue
-                nye_med += 1
-            out.append(k)
-            if len(out) >= n:
-                break
+        brugt = {o.navn for o in out} | ({gemt.navn} if gemt else set())
+        egne = [k for k in kand if not k.nyt and k.navn not in brugt]
+        nye = [k for k in kand if k.nyt and k.navn not in brugt]
+        egne = self._vaegtet_blanding(egne)
+        nye = self._vaegtet_blanding(nye)[:ALT_NYE_MAKS if self.recime else 2]
+        while len(out) < n and (egne or nye):
+            if nye and (not egne or (len(out) + 1) % ALT_NY_HVERT == 0):
+                out.append(nye.pop(0))
+            else:
+                out.append(egne.pop(0))
+        # Det, der stod forrest i dagene før, kommer lidt længere bagud i dag (ikke samme udvalg hver dag)
+        for o in out[:ALT_FORREST]:
+            self._vist[o.navn] = self._vist.get(o.navn, 0) + 1
         return out
+
+    def _vaegtet_blanding(self, kand: list[Valg]) -> list[Valg]:
+        """Rækkefølge trukket vægtet tilfældigt efter point (Efraimidis–Spirakis): høje point oftest først."""
+        noegler = []
+        for k in kand:
+            w = max(k.score, 1e-6) ** 1.6 * ALT_VIST_FAKTOR ** self._vist.get(k.navn, 0)
+            u = self.rnd.random() or 1e-12
+            noegler.append((u ** (1.0 / w), k))
+        noegler.sort(key=lambda t: -t[0])
+        return [k for _, k in noegler]
 
     def _traek(self, kand: list[Valg]) -> Valg:
         """Vælg blandt de bedste – vægtet, så topforslaget oftest vinder, men ikke altid."""
