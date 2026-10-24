@@ -2,11 +2,11 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.14.0";
-import "./im-planner.js?v=0.14.0";
-import "./im-retter.js?v=0.14.0";
-import "./im-ugevarer.js?v=0.14.0";
-import "./im-koleskab.js?v=0.14.0";
+} from "./im-common.js?v=0.15.0";
+import "./im-planner.js?v=0.15.0";
+import "./im-retter.js?v=0.15.0";
+import "./im-ugevarer.js?v=0.15.0";
+import "./im-koleskab.js?v=0.15.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -47,6 +47,41 @@ const fmtTimer = (h) => {
   return String(h).replace(".", ",") + " timer";
 };
 
+
+/* 0.15.0: rækkefølge pr. butik – kategori-nøglerne i butikkens rækkefølge; ukendte efter den
+   kategori, de står efter på listen (samme regel som ordnEfterButik) */
+function ordnNoegler(keys, orden) {
+  const pos = new Map(orden.map((k, i) => [k, i]));
+  let sidst = -1;
+  return keys.map((k, i) => {
+    let p;
+    if (pos.has(k)) { p = pos.get(k); sidst = p; } else p = sidst + 0.001 * (i + 1);
+    return { k, p, i };
+  }).sort((a, b) => a.p - b.p || a.i - b.i).map((x) => x.k);
+}
+
+/* Listens linjer med kategori-grupperne (overskrift + varerne under den) i butikkens rækkefølge.
+   Linjer før første overskrift bliver øverst. `noegler`: overskrift-id -> kategori-nøgle. */
+export function ordnEfterButik(lines, orden, noegler) {
+  const top = [];
+  const grupper = [];
+  let cur = null;
+  for (const ln of lines) {
+    if (ln.type === "header") {
+      cur = { k: noegler.get(ln.id) || "h:" + (ln.text || "").trim(), lines: [ln] };
+      grupper.push(cur);
+    } else (cur ? cur.lines : top).push(ln);
+  }
+  const pos = new Map(orden.map((k, i) => [k, i]));
+  let sidst = -1;
+  grupper.forEach((g, i) => {
+    if (pos.has(g.k)) { g.p = pos.get(g.k); sidst = g.p; } else g.p = sidst + 0.001 * (i + 1);
+    g.i = i;
+  });
+  grupper.sort((a, b) => a.p - b.p || a.i - b.i);
+  return [...top, ...grupper.flatMap((g) => g.lines)];
+}
+
 class IndkobMadplanPanel extends HTMLElement {
   constructor() {
     super();
@@ -67,6 +102,8 @@ class IndkobMadplanPanel extends HTMLElement {
     };
     this._hideChecked = lsGet("hideChecked", false);
     this._shop = lsGet("shop", false); // indkøbstilstand: tryk på rækken krydser af, intet tastatur
+    // 0.15.0: butikken, hvis rækkefølge listen vises i under Handl ("" = listens egen; null = sidste butik)
+    this._boValg = lsGet("butik_orden", null);
     this._weekOpen = false;
     this._insp = { tab: "oftest", q: "", data: null, version: null };
     this._mpCaret = null;
@@ -151,6 +188,7 @@ class IndkobMadplanPanel extends HTMLElement {
               <div class="forslag" id="af"></div>
               <div class="forslag" id="forslag"></div>
               <div class="synk-fejl" id="synk-fejl" role="alert" hidden></div>
+              <div class="bo-bar" id="bo-bar" hidden></div>
               <div id="cl"></div>
               <button class="ny-linje" data-act="ny-linje">Ny linje</button>
               <div class="butik-fod" id="butik-fod" hidden></div>
@@ -357,6 +395,16 @@ class IndkobMadplanPanel extends HTMLElement {
               <button class="kv-luk" type="button" data-act="ba-luk">Annullér</button>
             </form>
           </div>
+          <div class="katvalg" id="boark" hidden>
+            <div class="kv-ark bo-ark" role="dialog" aria-modal="true" aria-labelledby="bo-titel">
+              <div class="kv-greb"></div>
+              <h3 id="bo-titel">Rækkefølge i butikken</h3>
+              <p class="bo-sub">Når I handler, står kategorierne i den rækkefølge, I går rundt i butikken. Den læres af, hvornår I krydser varerne af – eller sæt den selv med pilene.</p>
+              <div class="kv-liste" id="bo-butikker"></div>
+              <div id="bo-orden"></div>
+              <button class="kv-luk" type="button" data-act="bo-luk">Luk</button>
+            </div>
+          </div>
           <div class="katvalg" id="katvalg" hidden>
             <div class="kv-ark" role="dialog" aria-modal="true" aria-labelledby="kv-titel">
               <div class="kv-greb"></div>
@@ -384,6 +432,7 @@ class IndkobMadplanPanel extends HTMLElement {
       onPlusAdded: plusAdded,
       onFast: (ln) => this._setFast(ln, !ln.fast),
       onFejl: (f) => this._synkFejl(f),
+      onFlettet: (res) => this._flettet(res, "indkob"),
     });
     this._clb = new Checklist(r.getElementById("cl-basis"), null, {
       editable: true,
@@ -395,6 +444,7 @@ class IndkobMadplanPanel extends HTMLElement {
       onDelete: (ln, prevId) => this._deleted(ln, prevId, "basis"),
       plus: true,
       onPlusAdded: plusAdded,
+      onFlettet: (res) => this._flettet(res, "basis"),
     });
     r.addEventListener("click", (e) => this._click(e));
     r.getElementById("ba-form").addEventListener("submit", (e) => {
@@ -473,7 +523,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._cl.store = this._store;
     this._cl.setCategories(s.indkob.kategorier);
     this._cl.setBought(s.indkob.tur?.koebt);
-    this._cl.setLines(s.indkob.lines);
+    this._cl.setLines(this._linjer());
     this._clb.store = this._store.forNote("basis");
     this._clb.setCategories(s.basis?.kategorier);
     this._clb.setLines(s.basis?.lines);
@@ -481,6 +531,7 @@ class IndkobMadplanPanel extends HTMLElement {
     this._renderKoleskab();
     this._updateFastBtn();
     if (!this.shadowRoot.getElementById("katvalg").hidden) this._renderKatvalg();
+    if (!this.shadowRoot.getElementById("boark").hidden) this._renderBo();
     this._renderNoteList();
     this._renderIndkob();
     this._renderMadplan();
@@ -647,6 +698,7 @@ class IndkobMadplanPanel extends HTMLElement {
     const open = items.filter((l) => !l.checked).map((l) => l.text);
     r.getElementById("forslag").innerHTML = forslagHTML(s.stats, open);
     this._renderAutofill();
+    this._renderBoBar();
     this._renderButikFod(tur, iKurv, tilbage, kl);
     this._renderPrisCta();
     if (!r.getElementById("butikark").hidden) {
@@ -1128,10 +1180,123 @@ class IndkobMadplanPanel extends HTMLElement {
     this._shop = on;
     lsSet("shop", on);
     this._cl.setMode({ editable: !on, tapToggle: on });
+    if (this._state) this._cl.setLines(this._linjer()); // 0.15.0: butikkens rækkefølge under Handl
     this.shadowRoot.querySelector("[data-act=ny-linje]").hidden = on;
     this._renderTools("indkob");
     if (this._state) this._renderIndkob();
     this._renderUgevarerCta();
+  }
+
+  /* 0.15.0: en linje, man skrev direkte i listen, stod der allerede og blev slået sammen */
+  _flettet(res, note = "indkob") {
+    const fra = res.flettet_fra || {};
+    const store = this._store.forNote(note);
+    this._toast(`"${(fra.text || "").trim()}" stod der allerede – slået sammen med "${(res.text || "").trim()}"`, {
+      label: "Fortryd",
+      action: () => store.send("indkob/add", {
+        text: fra.text, after_id: fra.prev || "__top__", line_type: "item", restore: true,
+      }).catch(() => this._setStatus("Kunne ikke fortryde")),
+    });
+  }
+
+  /* ------------------------------------------------------------ rækkefølge pr. butik (0.15.0) */
+  _boAktiv() {
+    const bo = this._state?.indkob?.butik_orden || [];
+    if (this._boValg === "") return null;
+    if (this._boValg) return bo.find((b) => b.navn.toLowerCase() === this._boValg.toLowerCase()) || null;
+    return bo[0] || null; // standard: butikken, I sidst handlede i
+  }
+
+  _katNoegler() {
+    return new Map((this._state?.indkob?.kategorier || []).filter((c) => c.id).map((c) => [c.id, c.fast || "h:" + c.navn.trim()]));
+  }
+
+  /* Listens linjer – under Handl med kategorierne i butikkens rækkefølge (kun visningen; listen er uændret) */
+  _linjer() {
+    const lines = this._state?.indkob?.lines || [];
+    const a = this._shop ? this._boAktiv() : null;
+    return a ? ordnEfterButik(lines, a.orden, this._katNoegler()) : lines;
+  }
+
+  _renderBoBar() {
+    const el = this.shadowRoot.getElementById("bo-bar");
+    const bo = this._state?.indkob?.butik_orden || [];
+    el.hidden = !this._shop || (!bo.length && !this._butikNavne().length);
+    if (el.hidden) return;
+    const a = this._boAktiv();
+    el.innerHTML = `<button type="button" class="bo-knap" data-act="bo-aabn">
+        <span class="bo-ikon" aria-hidden="true">🏪</span>
+        <span class="bo-tx">${a ? `Rækkefølge: <b>${esc(a.navn)}</b>` : "Listens egen rækkefølge"}</span>
+        <span class="pc-pil" aria-hidden="true">›</span></button>`;
+  }
+
+  _openBo() {
+    this._renderBo();
+    this.shadowRoot.getElementById("boark").hidden = false;
+  }
+
+  _closeBo() {
+    this.shadowRoot.getElementById("boark").hidden = true;
+  }
+
+  _renderBo() {
+    const r = this.shadowRoot;
+    const s = this._state;
+    if (!s) return;
+    const bo = s.indkob.butik_orden || [];
+    const a = this._boAktiv();
+    const navne = [...bo.map((b) => b.navn)];
+    for (const n of this._butikNavne()) if (!navne.some((x) => x.toLowerCase() === n.toLowerCase())) navne.push(n);
+    const valgt = this._boValg === "" ? "" : (a?.navn || this._boValg || "");
+    const knap = (navn, label, sub) => `<button type="button" class="kv-k${navn.toLowerCase() === valgt.toLowerCase() ? " valgt" : ""}"
+        data-act="bo-valg" data-navn="${esc(navn)}"><span>${label}${sub ? `<small class="bo-s">${sub}</small>` : ""}</span>
+        <span class="kv-n">${navn.toLowerCase() === valgt.toLowerCase() ? "✓" : ""}</span></button>`;
+    r.getElementById("bo-butikker").innerHTML = navne.map((n) => {
+      const b = bo.find((x) => x.navn.toLowerCase() === n.toLowerCase());
+      const sub = !b ? "Ingen rækkefølge endnu – læres, når I afslutter et indkøb her"
+        : b.kilde === "manuel" ? "Sat i hånden" : `Lært af ${b.ture} ${b.ture === 1 ? "indkøb" : "indkøb"}`;
+      return knap(n, esc(n), sub);
+    }).join("") + knap("", "Listens egen rækkefølge", "Som listen står i Rediger");
+    const box = r.getElementById("bo-orden");
+    if (!a) {
+      box.innerHTML = "";
+      return;
+    }
+    // Kategorierne på listen i butikkens rækkefølge (dem, butikken ikke kender endnu, efter samme regel som listen)
+    const navn = new Map();
+    for (const c of s.indkob.kategorier || []) {
+      const k = c.fast || "h:" + c.navn.trim();
+      if (c.id || !navn.has(k)) navn.set(k, { navn: c.navn, varer: c.varer || 0, paa: !!c.id });
+    }
+    // Kun kategorier med varer – det, I ser under Handl (tomme kategorier er skjult dér)
+    const keys = ordnNoegler([...navn.keys()].filter((k) => navn.get(k).paa && navn.get(k).varer > 0), a.orden);
+    box.innerHTML = `<h3 class="bo-h">Rækkefølgen i ${esc(a.navn)}</h3>
+      <ol class="bo-liste">${keys.map((k, i) => `<li><span class="bo-n">${esc(prettyHeader(navn.get(k).navn))}</span>
+          <button type="button" class="bo-pil" data-act="bo-op" data-i="${i}" ${i ? "" : "disabled"} aria-label="Flyt op">↑</button>
+          <button type="button" class="bo-pil" data-act="bo-ned" data-i="${i}" ${i < keys.length - 1 ? "" : "disabled"} aria-label="Flyt ned">↓</button></li>`).join("")}</ol>
+      ${a.kilde === "manuel" ? `<button type="button" class="link bo-nul" data-act="bo-nulstil">Lær rækkefølgen af jeres indkøb igen</button>` : ""}`;
+    this._boKeys = keys;
+  }
+
+  async _boFlyt(i, d) {
+    const a = this._boAktiv();
+    const keys = [...(this._boKeys || [])];
+    const j = i + d;
+    if (!a || j < 0 || j >= keys.length) return;
+    [keys[i], keys[j]] = [keys[j], keys[i]];
+    // Kategorier, der ikke vises lige nu (tomme), beholder deres plads: lige efter den kategori, de stod efter
+    const orden = [...keys];
+    let forrige = null;
+    for (const k of a.orden) {
+      if (orden.includes(k)) { forrige = k; continue; }
+      orden.splice(forrige === null ? 0 : orden.indexOf(forrige) + 1, 0, k);
+      forrige = k;
+    }
+    try {
+      await this._store.send("butik/orden/saet", { butik: a.navn, orden });
+    } catch (err) {
+      this._setStatus("Kunne ikke gemme rækkefølgen");
+    }
   }
 
   /* Swipe-slet: vis "Fortryd" i nogle sekunder */
@@ -1169,10 +1334,11 @@ class IndkobMadplanPanel extends HTMLElement {
       <p><b>Færdig med at handle</b> (nederst i Handl eller under ⋯): skriv butik og beløb – eller spring over – så sættes listen tilbage til basislisten med det samme. Engangsvarer, der ikke blev købt, bliver stående; tryk på dem i arket, hvis de ikke skal med næste gang. "Slet afkrydsede varer" fjerner de afkrydsede varer – faste varer kommer dog tilbage.</p>
       <p><b>Hvad blev indkøbet?</b> Mangler det seneste indkøb et beløb (fx når listen er nulstillet automatisk), står der et kort øverst på listen. Tryk på det og skriv beløbet, eller × hvis det ikke skal have en pris.</p>
       <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
+      <p><b>Butikkens rækkefølge:</b> under Handl står kategorierne i den rækkefølge, I plejer at gå rundt i butikken – den læres af, hvornår I krydser varerne af, hver gang I afslutter et indkøb i butikken. Tryk på 🏪 over listen for at vælge butik, sætte rækkefølgen selv med pilene eller vise listens egen rækkefølge. Selve listen (Rediger) ændres ikke.</p>
       <p><b>Afslut indkøb i butik:</b> når I har betalt, så tryk på knappen nederst i listen, vælg butikken og skriv evt. beløbet. Varerne gemmes som købt i den butik og forsvinder fra listen, så kun det, der mangler, står tilbage. Handler I videre i en anden butik, gør I bare det samme dér – det er ikke et krav. ${tim[0].toUpperCase() + tim.slice(1)} efter sidste butik fjernes fluebenene. Glemmer I knappen, registreres indkøbet stadig automatisk – så spørger kortet øverst på listen bagefter, hvad det blev.</p>
       <p><b>Nye varer</b> er engangsvarer (tryk <i>Fast</i> i beskeden, hvis de skal blive på listen): skriv i feltet øverst, så finder listen selv kategorien – den overskrift varen plejer at stå under, ellers et gæt ud fra navnet (mælk → Køl – mejeri, kyllingebryst → Køl – kød). Ved ukendte varer bliver det Ugevarer. Tryk på <i>Skift</i> i beskeden nederst, hvis den landede forkert – så huskes det til næste gang.</p>
       <p><b>＋ under en kategori</b> tilføjer en vare lige præcis dér. Enter giver plads til den næste. Kategorier uden varer vises ikke – de dukker op, så snart der kommer en vare i dem.</p>
-      <p>Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
+      <p>Står varen der allerede, får den bare fluebenet fjernet – listen får ingen dubletter. Skriver I varen direkte i listen, og den står der i forvejen, slås de to linjer sammen, når I er færdige med at skrive (Fortryd i beskeden). Træk i ≡ for at flytte en vare – placeringen huskes til næste gang.</p>
       <p><b>Slet en linje:</b> swipe den mod venstre (kort = vis Slet, langt = slet med det samme). Fortryd nederst på skærmen i et par sekunder. Backspace på en tom linje sletter den også.</p>
       <p><b>Overskrifter:</b> markér en linje og tryk <i>Overskrift</i> øverst – tryk igen for at gøre den til en vare. Enter giver en ny linje.</p>
       <p><b>Forslag</b> over listen er varer, I plejer at købe, som mangler nu. Tryk for at tilføje.</p>
@@ -1683,12 +1849,28 @@ class IndkobMadplanPanel extends HTMLElement {
       return;
     }
     if (e.target.id === "katvalg") return this._closeKatvalg();
+    if (e.target.id === "boark") return this._closeBo();
     if (e.target.id === "butikark") return this._closeButik();
     const b = e.target.closest("[data-act]");
     const pop = r.getElementById("pop");
     if (pop && !e.target.closest("#pop") && b?.dataset.act !== "mere") pop.hidden = true;
     if (!b) return;
     const act = b.dataset.act;
+    if (act === "bo-aabn") return this._openBo();
+    if (act === "bo-luk") return this._closeBo();
+    if (act === "bo-valg") {
+      this._boValg = b.dataset.navn;
+      lsSet("butik_orden", this._boValg);
+      this._cl.setLines(this._linjer());
+      this._renderBoBar();
+      return this._renderBo();
+    }
+    if (act === "bo-op" || act === "bo-ned") return this._boFlyt(+b.dataset.i, act === "bo-op" ? -1 : 1);
+    if (act === "bo-nulstil") {
+      const a = this._boAktiv();
+      if (a) this._store.send("butik/orden/nulstil", { butik: a.navn }).catch(() => this._setStatus("Kunne ikke nulstille"));
+      return;
+    }
     if (act === "menu") {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
     } else if (act === "tilbage") {
@@ -2095,6 +2277,23 @@ const PANEL_CSS = `
   .bf-knap:disabled { background: var(--im-bg2); color: var(--im-dim); cursor: default; }
   .bf-hint { margin: 10px 2px 0; color: var(--im-dim); font-size: 14px; line-height: 1.4; text-align: center; }
   .katvalg.top { align-items: flex-start; }
+  .bo-bar { margin: 0 0 8px; }
+  .bo-knap { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 12px; box-sizing: border-box;
+             font: inherit; font-size: 15px; color: var(--im-text); background: var(--im-bg2); border: 0; border-radius: 12px;
+             text-align: left; cursor: pointer; }
+  .bo-knap .bo-tx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bo-knap .pc-pil { color: var(--im-dim); font-size: 20px; }
+  .bo-sub { margin: 0 0 6px; color: var(--im-dim); font-size: 14px; line-height: 1.35; }
+  .bo-s { display: block; color: var(--im-dim); font-size: 13px; font-weight: 400; }
+  .bo-h { margin: 14px 0 4px; font-size: 15px; font-weight: 700; }
+  .bo-liste { list-style: none; margin: 0; padding: 0; counter-reset: bo; }
+  .bo-liste li { display: flex; align-items: center; gap: 6px; min-height: 44px; border-bottom: 1px solid var(--im-line); counter-increment: bo; }
+  .bo-liste li::before { content: counter(bo) "."; width: 24px; color: var(--im-dim); font-size: 14px; }
+  .bo-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+  .bo-pil { width: 44px; height: 40px; font: inherit; font-size: 18px; color: var(--im-acc); background: var(--im-bg2); border: 0;
+            border-radius: 10px; cursor: pointer; }
+  .bo-pil:disabled { opacity: .3; cursor: default; }
+  .bo-nul { margin-top: 10px; }
   .katvalg.top .kv-ark { border-radius: 0 0 18px 18px; padding: calc(14px + var(--safe-area-inset-top, 0px)) 16px 16px; }
   .ba h3 { white-space: normal; }
   .ba-sub { margin: 0 0 12px; color: var(--im-dim); font-size: 15px; }

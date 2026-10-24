@@ -21,8 +21,8 @@
  * dem, foreslås først og lægges på de første dage. Ændres køleskabet, får de dage, I ikke selv har
  * valgt, et nyt bud (som "Bland").
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.14.0";
-import "./im-koleskab.js?v=0.14.0";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.15.0";
+import "./im-koleskab.js?v=0.15.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];

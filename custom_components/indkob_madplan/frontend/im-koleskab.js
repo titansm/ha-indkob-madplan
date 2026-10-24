@@ -15,7 +15,7 @@
  * hvilke ugens retter bruger); dagene viser selv 🧊. Tryk på linjen folder hele listen (Nok/Lidt, ×)
  * og feltet ud. Noten "Køleskab" er uændret (altid hele listen).
  */
-import { esc } from "./im-common.js?v=0.14.0";
+import { esc } from "./im-common.js?v=0.15.0";
 
 const KORT = { Mandag: "man.", Tirsdag: "tirs.", Onsdag: "ons.", Torsdag: "tors.", Fredag: "fre.", "Lørdag": "lør.", "Søndag": "søn." };
 const lf = (s) => (s && !/^[A-ZÆØÅ]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");
@@ -238,8 +238,11 @@ class ImKoleskab extends HTMLElement {
           this._render();
           throw err;
         }
+        // 0.15.0: en fast vare, som "Nok" holdt væk, kommer på indkøbslisten igen ved "Lidt"
+        const igen = (res.tilbage || []).map((l) => l.text);
         if (res.fjernet?.length) this._fjernetBesked(res.fjernet);
-        else this._besked(nok ? `${x.navn}: I har nok – købes ikke` : `${x.navn}: lidt – købes stadig`, null, 3500);
+        else this._besked(nok ? `${x.navn}: I har nok – købes ikke`
+          : `${x.navn}: lidt – købes stadig${igen.length ? ` · ${opremsning(igen)} står på indkøbslisten igen` : ""}`, null, igen.length ? 5000 : 3500);
         this._aendret();
       } else if (a === "fjern") {
         const res = await this._send("koleskab/fjern", { rest_ids: [id] });
@@ -247,8 +250,10 @@ class ImKoleskab extends HTMLElement {
         this._liste = this._liste.filter((y) => y.id !== id);
         this._render();
         if (ud.length) {
-          this._besked(`Tog ${lf(ud[0].navn)} ud af køleskabet`, async () => {
-            await this.store.send("koleskab/tilfoej", { navne: [ud[0].navn], nok: !!ud[0].nok, liste: false });
+          // 0.15.0: en fast vare, som resten holdt væk fra listen, kommer på listen igen (Fortryd tager den af igen)
+          const igen = (res.tilbage || []).map((l) => l.text);
+          this._besked(`Tog ${lf(ud[0].navn)} ud af køleskabet${igen.length ? ` · ${opremsning(igen)} står på indkøbslisten igen` : ""}`, async () => {
+            await this.store.send("koleskab/tilfoej", { navne: [ud[0].navn], nok: !!ud[0].nok, liste: igen.length > 0 });
             this._aendret();
           });
         }

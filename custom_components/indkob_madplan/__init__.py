@@ -68,7 +68,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
         ws_madplan__kladde__hent, ws_madplan__kladde__gem, ws_madplan__kladde__slet,
         ws_koleskab__tilfoej, ws_koleskab__saet, ws_koleskab__fjern,
-        ws_madplan__versioner,
+        ws_madplan__versioner, ws_butik__orden__saet, ws_butik__orden__nulstil,
     ):
         websocket_api.async_register_command(hass, cmd)
     _register_services(hass)
@@ -226,11 +226,12 @@ def ws_indkob__kategori(m: IndkobMadplanManager, msg: dict, user: str | None) ->
     vol.Optional("text"): TEXT,
     vol.Optional("checked"): bool,
     vol.Optional("line_type"): vol.In(LINE_TYPES),
+    vol.Optional("dedupe", default=False): bool,  # 0.15.0: færdig med at skrive – flet med samme vare
     **NOTE_FIELD,
 })
 def ws_indkob__update(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.update_line(msg["line_id"], user, text=msg.get("text"), checked=msg.get("checked"),
-                         line_type=msg.get("line_type"), note=msg["note"])
+                         line_type=msg.get("line_type"), note=msg["note"], dedupe=msg["dedupe"])
 
 
 @_ws({vol.Required("line_ids"): [str], **NOTE_FIELD})
@@ -508,6 +509,20 @@ def ws_trip__spring_pris(m: IndkobMadplanManager, msg: dict, user: str | None) -
 @_ws({vol.Required("trip_id"): str})
 def ws_trip__delete(m: IndkobMadplanManager, msg: dict, user: str | None) -> None:
     m.delete_trip(msg["trip_id"], user)
+
+
+# 0.15.0: rækkefølge pr. butik
+@_ws({
+    vol.Required("butik"): vol.All(str, vol.Length(min=1, max=60)),
+    vol.Required("orden"): vol.All([vol.All(str, vol.Length(min=1, max=80))], vol.Length(min=2, max=40)),
+})
+def ws_butik__orden__saet(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.saet_butik_orden(msg["butik"], msg["orden"], user)
+
+
+@_ws({vol.Required("butik"): vol.All(str, vol.Length(min=1, max=60))})
+def ws_butik__orden__nulstil(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict | None:
+    return m.nulstil_butik_orden(msg["butik"], user)
 
 
 # Navnene på handlerne bestemmer websocket-typen: ws_indkob__add -> indkob_madplan/indkob/add

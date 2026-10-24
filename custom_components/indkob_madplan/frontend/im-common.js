@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.14.0";
+export const VERSION = "0.15.0";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -219,7 +219,7 @@ export class Checklist {
   constructor(container, store, {
     editable = true, hideChecked = false, onFocusLine = null, scroller = null,
     onDelete = null, tapToggle = false, swipe = null, plus = false, onPlusAdded = null,
-    checkbox = true, onFast = null, onFejl = null,
+    checkbox = true, onFast = null, onFejl = null, onFlettet = null,
   } = {}) {
     this.el = container;
     this.store = store;
@@ -237,6 +237,9 @@ export class Checklist {
     this.onFast = onFast; // (linje) -> tryk på "Engangs"-mærket (gør varen fast)
     // 0.13.0: ({tekst, fejl, igen}) -> en ændring blev IKKE gemt (vis det tydeligt, med "Prøv igen")
     this.onFejl = onFejl;
+    // 0.15.0: (svar fra indkob/update) -> linjen stod der allerede og blev slået sammen (vis "Fortryd")
+    this.onFlettet = onFlettet;
+    this._edited = new Set(); // linjer man har skrevet i siden sidste "færdig" (fokus væk / Enter)
     this.plusRows = new Map(); // overskrift-id -> række
     this.fixed = new Set(); // id'er på faste kategorier (skjules når de er tomme)
     this.bought = new Map(); // linje-id -> butik (købt i en butik, der er afsluttet på turen)
@@ -274,13 +277,13 @@ export class Checklist {
       const plus = e.target.closest("[data-plus]");
       if (plus) return this._plusBlur(e.target, plus.dataset.plus);
       const row = e.target.closest("[data-id]");
-      if (row) this._flush(row.dataset.id);
+      if (row) this._flush(row.dataset.id, true);
     });
   }
 
   /* Skift mellem redigering og indkøbstilstand (rækkerne bygges om). */
   setMode({ editable, tapToggle = false, swipe = null }) {
-    for (const id of [...this.dirty.keys()]) this._flush(id);
+    for (const id of new Set([...this.dirty.keys(), ...this._edited])) this._flush(id, true);
     this._closeOpen();
     this.editable = editable;
     this.tapToggle = tapToggle;
@@ -832,7 +835,11 @@ export class Checklist {
   _gem(id, changes, tekst, { anvend = null, rul = null } = {}) {
     this.rows.get(id)?.classList.add("afventer");
     return this.store.update(id, changes).then(
-      () => this.rows.get(id)?.classList.remove("afventer"),
+      (res) => {
+        this.rows.get(id)?.classList.remove("afventer");
+        if (res?.flettet) this.onFlettet?.(res); // 0.15.0
+        return res;
+      },
       (e) => {
         this.rows.get(id)?.classList.remove("afventer");
         rul?.();
@@ -851,22 +858,28 @@ export class Checklist {
     const id = row.dataset.id;
     const ln = this._line(id);
     if (ln) ln.text = e.target.value;
+    this._edited.add(id);
     clearTimeout(this.dirty.get(id));
     this.dirty.set(id, setTimeout(() => this._flush(id), 600));
   }
 
-  _flush(id) {
-    if (!this.dirty.has(id)) return;
+  /* Gem linjens tekst. `faerdig` (0.15.0): man er færdig med at skrive (fokus væk / Enter) – så beder vi
+     backend om at slå linjen sammen med samme vare, hvis den allerede står på listen. Returnerer svaret. */
+  _flush(id, faerdig = false) {
+    const skrevet = faerdig && this._edited.has(id);
+    if (!this.dirty.has(id) && !skrevet) return null;
     clearTimeout(this.dirty.get(id));
     this.dirty.delete(id);
+    if (faerdig) this._edited.delete(id);
     const row = this.rows.get(id);
     const tx = row?.querySelector("input");
     const ln = this._line(id);
-    if (!tx || !ln) return;
+    if (!tx || !ln) return null;
     let changes = { text: tx.value };
     // En tom linje der får tekst bliver en vare
     if (ln.type === "blank" && tx.value.trim()) changes.line_type = "item";
-    this._gem(id, changes, `"${tx.value.trim() || "Linjen"}" blev ikke gemt`);
+    if (skrevet && tx.value.trim() && ln.type !== "header") changes.dedupe = true;
+    return this._gem(id, changes, `"${tx.value.trim() || "Linjen"}" blev ikke gemt`);
   }
 
   async _key(e) {
@@ -877,15 +890,24 @@ export class Checklist {
     if (!ln) return;
     if (e.key === "Enter") {
       e.preventDefault();
-      this._flush(id);
+      const idx = this.lines.findIndex((l) => l.id === id);
+      const prevId = idx > 0 ? this.lines[idx - 1].id : null;
+      const gemt = this._flush(id, true);
       const value = e.target.value;
       // Enter på tom vare: ud af listen (som i Noter) -> tom linje
       if (ln.type === "item" && !value.trim()) {
         this._gem(id, { line_type: "blank", text: "" }, "Den tomme linje blev ikke gemt");
         return;
       }
+      let efter = id;
+      if (gemt) {
+        try {
+          // 0.15.0: blev linjen slået sammen med en, der stod der, kommer den nye linje på dens plads
+          if ((await gemt)?.flettet) efter = prevId || "__top__";
+        } catch (err) {}
+      }
       try {
-        const nl = await this.store.add("", { after_id: id, line_type: "item" });
+        const nl = await this.store.add("", { after_id: efter, line_type: "item" });
         this._focusSoon(nl.id, 0);
       } catch (err) {}
     } else if (e.key === "Backspace" && e.target.value === "" && e.target.selectionStart === 0) {

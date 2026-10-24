@@ -7,7 +7,7 @@
  * Elementerne har ingen egen shadow-root: de tegnes inde i panelets, så panelets typografi og
  * Indstillinger-kortene (.kort/.felt) gælder. Derfor bruges ingen data-act/data-set/data-note her.
  */
-import { esc, lsGet, lsSet } from "./im-common.js?v=0.14.0";
+import { esc, lsGet, lsSet } from "./im-common.js?v=0.15.0";
 
 const ENHEDER = ["", "g", "kg", "ml", "dl", "l", "stk", "tsk", "spsk", "fed", "dåse", "pakke", "bundt", "glas", "flaske", "knivspids"];
 const MDR = ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "dec."];
@@ -287,7 +287,8 @@ class ImRetter extends HTMLElement {
     if (act === "vis-opskrift") return this._aabn(b.dataset.id);
     if (act === "fryser") {
       s.mode = "fryser";
-      s.fz = [...(s.d?.fryser || [])];
+      // 0.15.0: på en opskrift uden eget valg starter editoren med opskriftens kød
+      s.fz = [...(s.d?.fryser || (s.d?.type === "opskrift" ? s.d?.fryser_auto || [] : []))];
       this._renderArk();
       requestAnimationFrame(() => this.querySelector("#rt-fzny")?.focus());
       return;
@@ -452,6 +453,19 @@ class ImRetter extends HTMLElement {
         body += `<p class="rt-note adv">Ikke med på listen – tilføj selv under Rediger, hvis de skal købes: ${d.ikke_tolket.map((x) => `"${esc(x)}"`).join(", ")}</p>`;
       }
       if (d.rettet) body += `<button type="button" class="link" data-r="gendan">Gendan opskriftens liste</button>`;
+      // 0.15.0: kød fra fryseren også på opskrifter – jeres valg, ellers opskriftens kød
+      const fo = d.fryser;
+      const auto = d.fryser_auto || [];
+      body += `<h3 class="rt-gr">❄ Fra fryseren</h3>`;
+      body += fo == null
+        ? (auto.length
+          ? `<div class="rt-fz">${auto.map((a) => `<span class="rt-fzc">${esc(a)}</span>`).join("")}</div>
+             <p class="rt-note">Fra opskriften – påmindelsen siger "Tag ${esc(auto.join(" eller "))} op af fryseren".</p>`
+          : `<p class="rt-note">Intet kød fra fryseren i opskriften.</p>`)
+        : !fo.length
+          ? `<p class="rt-note">Intet skal op af fryseren.</p>`
+          : `<div class="rt-fz">${fo.map((a) => `<span class="rt-fzc">${esc(a === "intet" ? "Intet fra fryseren" : a)}</span>`).join("")}</div>`;
+      body += `<div class="rt-links"><button type="button" class="link" data-r="fryser">${fo == null ? "Ret kød fra fryseren …" : "Ret kød fra fryseren …"}</button></div>`;
       const links = [`<a class="rt-link" href="${esc(d.recime)}" target="_blank" rel="noopener">Åbn opskriften i ReciMe ↗</a>`];
       if (d.kilde) links.push(`<a class="rt-link" href="${esc(d.kilde)}" target="_blank" rel="noopener">${/instagram/.test(d.kilde) ? "Original på Instagram" : "Original opskrift"} ↗</a>`);
       body += `<div class="rt-links">${links.join("")}</div>`;
@@ -544,7 +558,7 @@ class ImRetter extends HTMLElement {
           <button type="button" class="rt-knap lille" data-r="fz-tilfoej">Tilføj</button>
         </div>
         <label class="rt-fzi"><input type="checkbox" data-r="fz-intet" ${intet ? "checked" : ""} /> ${koed.length ? "Kan også være uden kød fra fryseren" : "Intet fra fryseren"}</label>
-        <div class="rt-links"><button type="button" class="link" data-r="fz-ryd">Ryd – lad påmindelsen gætte ud fra navnet</button></div>
+        <div class="rt-links"><button type="button" class="link" data-r="fz-ryd">${s.d?.type === "opskrift" ? "Ryd – brug opskriftens kød" : "Ryd – lad påmindelsen gætte ud fra navnet"}</button></div>
         <p class="rt-fejl fejl" id="rt-fejl" hidden></p>
       </div>`;
     this.querySelector("#rt-fzny").addEventListener("keydown", (e) => {

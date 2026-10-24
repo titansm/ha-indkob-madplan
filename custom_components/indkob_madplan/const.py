@@ -1,7 +1,7 @@
 """Konstanter for Indkøb & Madplan."""
 
 DOMAIN = "indkob_madplan"
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 
 CONF_FROST_DAY = "frost_day"
 CONF_EXTRA_KOED = "extra_koed_ord"

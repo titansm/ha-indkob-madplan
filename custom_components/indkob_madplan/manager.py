@@ -10,6 +10,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from statistics import median
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -62,6 +63,10 @@ _LOGGER = logging.getLogger(__name__)
 KLADDE_MAX = 400_000
 # Køleskabet (0.12.5): højst så mange rester ad gangen
 KOLESKAB_MAX = 40
+# Rækkefølge pr. butik (0.15.0): flueben inden for så lang tid før "Afslut indkøb i butik" tæller
+BUTIK_VINDUE = timedelta(hours=3)
+# … og så mange flueben skal der være (i mindst 2 kategorier), før rækkefølgen læres
+BUTIK_MIN_VARER = 4
 
 
 class ConflictError(Exception):
@@ -121,6 +126,9 @@ class IndkobMadplanManager:
         self.koleskab: list[dict] = []
         self._varenavne_cache: tuple | None = None
         self._kol_brug_cache: tuple | None = None
+        # Rækkefølge pr. butik (0.15.0): navn (små bogstaver) -> {"navn", "orden": [kategori-nøgler],
+        # "kilde": "laert" | "manuel", "ture", "t", "sidst"}
+        self.butik_orden: dict[str, dict] = {}
 
     # ------------------------------------------------------------ options
     @property
@@ -212,6 +220,9 @@ class IndkobMadplanManager:
         self.madplan_revisioner = [x for x in (data.get("madplan_revisioner") or [])
                                    if isinstance(x, dict) and isinstance(x.get("version"), int)][-MADPLAN_REVISIONER:]
         self._bank_laast = None
+        self.butik_orden = {k: v for k, v in (data.get("butik_orden") or {}).items()
+                            if isinstance(v, dict) and isinstance(v.get("orden"), list)}
+        laer_butikker = "butik_orden" not in data  # første start med 0.15.0: lær af de seneste indkøb
         try:
             raa = await self.bank_store.async_load()
             self.bank = op.Opskriftsbank(raa)
@@ -249,6 +260,13 @@ class IndkobMadplanManager:
         )
         self._parse_madplan()
         self._koleskab_opbrug(notify=False)  # var HA slukket ved midnat
+        if laer_butikker:
+            try:
+                n = self._laer_fra_historik()
+                if n:
+                    _LOGGER.info("Rækkefølge lært for %s butik(ker) ud fra indkøbshistorikken", n)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Kunne ikke lære butikkernes rækkefølge af historikken")
         self._feed_history()
         self.stats = self.history.compute(dt_util.now())
         self._on_tick(dt_util.now())
@@ -271,6 +289,7 @@ class IndkobMadplanManager:
             "log": self.log,
             "planner": self.planner_data,
             "koleskab": self.koleskab,
+            "butik_orden": self.butik_orden,
             # 0.13.0: tidligere versioner af madplanen + hvor mange retter banken havde (læsefejl-vagt)
             "madplan_revisioner": self._revisioner(),
             "bank_antal": self._bank_antal(),
@@ -437,10 +456,20 @@ class IndkobMadplanManager:
                 ln.pop("ret", None)  # købt til ugens retter – den faste vare starter forfra
         self.indkob.uncheck_all()
         tilbage = []
+        holdt = []
+        nok = [r for r in self.koleskab if r.get("nok")]
         for b in self.basis.items():
             if self.indkob.find_item(b["text"]) is None:
+                # 0.15.0: står den faste vare som "Nok" i køleskabet, bliver den væk fra listen
+                # (den kommer igen, når resten sættes til "Lidt" eller tages ud af køleskabet)
+                if any(kol.passer(r["navn"], b["text"]) for r in nok):
+                    holdt.append(b["text"])
+                    continue
                 header = self.indkob.learned_header(b["text"]) or self.basis.category_of(b["id"])
                 tilbage.append(self.indkob.add_under(b["text"], header))
+        if holdt:
+            self._log(user, "indkob", f"lod {len(holdt)} {'fast vare' if len(holdt) == 1 else 'faste varer'} blive væk"
+                      " – nok i køleskabet: " + _names(holdt, 6))
         if slet:
             self._log(user, "indkob", f"fjernede {len(slet)} købte engangsvarer: " + _names([ln["text"] for ln in slet], 6))
         if tilbage:
@@ -628,6 +657,11 @@ class IndkobMadplanManager:
                 "line_ids": [ln["id"] for ln in lines]}
         self._stops().append(stop)
         varer = clean_names([ln["text"] for ln in lines])
+        try:  # 0.15.0: lær butikkens rækkefølge af, hvornår varerne blev krydset af
+            self._laer_butik(butik, [(ln["text"], self._kat_noegle(self.indkob.category_of(ln["id"]))) for ln in lines],
+                             now)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Kunne ikke lære rækkefølgen i %s", butik)
         tr["betalinger"].append({"butik": butik, "beloeb": beloeb, "varer": varer, "t": iso, "stop": stop["id"]})
         tr["varer"] = [n for b in tr["betalinger"] for n in b.get("varer", [])]
         tr["t"] = iso
@@ -639,6 +673,137 @@ class IndkobMadplanManager:
         })
         self._trips_changed()
         return {"stop_id": stop["id"], "butik": butik, "beloeb": beloeb, "antal": len(varer), "trip_id": tr["id"]}
+
+    # ------------------------------------------------------------ rækkefølge pr. butik (0.15.0)
+    @staticmethod
+    def _kat_noegle(header: str | None) -> str | None:
+        """Kategoriens nøgle: fast kategori ("mejeri") eller jeres egen overskrift ("h:<tekst>")."""
+        if not header or not header.strip():
+            return None
+        return kat.header_noegle(header) or ("h:" + header.strip())
+
+    def _koebstider(self, navne: list[str], slut: datetime) -> dict[str, datetime]:
+        """Varenøgle -> seneste flueben inden for BUTIK_VINDUE før `slut` (fra købsloggen)."""
+        fra = slut - BUTIK_VINDUE
+        til = slut + timedelta(minutes=1)
+        keys = {normalize(n) for n in navne if normalize(n)}
+        ud: dict[str, datetime] = {}
+        for ev in reversed(self.history.events):
+            if ev.get("type") != "buy" or ev.get("k") not in keys or ev["k"] in ud:
+                continue
+            try:
+                t = datetime.fromisoformat(ev["t"])
+            except (TypeError, ValueError):
+                continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=slut.tzinfo)
+            if fra <= t <= til:
+                ud[ev["k"]] = t
+        return ud
+
+    @staticmethod
+    def _orden_af(poster: list[tuple[str, datetime]]) -> list[str] | None:
+        """Kategorierne i den rækkefølge, de blev handlet (median-tidspunkt pr. kategori)."""
+        pr: dict[str, list[float]] = {}
+        for k, t in poster:
+            pr.setdefault(k, []).append(t.timestamp())
+        if len(poster) < BUTIK_MIN_VARER or len(pr) < 2:
+            return None
+        return sorted(pr, key=lambda k: (median(pr[k]), k))
+
+    @staticmethod
+    def _bland_orden(gammel: list[str], ny: list[str]) -> list[str]:
+        """Ny tur vægter det halve: kategorier fra begge ture får gennemsnittet af deres pladser."""
+        def pos(lst: list[str]) -> dict[str, float]:
+            n = max(1, len(lst) - 1)
+            return {k: i / n for i, k in enumerate(lst)}
+        pg, pn = pos(gammel), pos(ny)
+        alle = list(dict.fromkeys(gammel + ny))
+        score = {k: (pg[k] + pn[k]) / 2 if k in pg and k in pn else pn.get(k, pg.get(k, 1.0)) for k in alle}
+        return sorted(alle, key=lambda k: (score[k], pn.get(k, 2.0), pg.get(k, 2.0)))
+
+    def _laer_butik(self, butik: str, varer: list[tuple[str, str | None]], slut: datetime) -> list[str] | None:
+        """Lær (eller juster) butikkens rækkefølge ud fra én tur. `varer` = (navn, kategori-nøgle)."""
+        butik = (butik or "").strip()[:60]
+        if not butik:
+            return None
+        tider = self._koebstider([n for n, _k in varer], slut)
+        poster = [(k, tider[normalize(n)]) for n, k in varer if k and normalize(n) in tider]
+        orden = self._orden_af(poster)
+        if orden is None:
+            return None
+        key = butik.lower()
+        iso = slut.isoformat(timespec="seconds")
+        bo = self.butik_orden.get(key)
+        if bo and bo.get("kilde") == "manuel":
+            bo.update(ture=bo.get("ture", 0) + 1, sidst=iso)  # sat i hånden: jeres rækkefølge bliver stående
+            return bo["orden"]
+        if bo:
+            orden = self._bland_orden(bo["orden"], orden)
+        self.butik_orden[key] = {"navn": butik, "orden": orden, "kilde": "laert",
+                                 "ture": (bo or {}).get("ture", 0) + 1, "t": iso, "sidst": iso}
+        return orden
+
+    def _laer_fra_historik(self, butik: str | None = None) -> int:
+        """Lær rækkefølgen af de seneste 180 dages indkøb (butikker med tidspunkt og varer)."""
+        graense = dt_util.now() - timedelta(days=180)
+        laert = set()
+        for tr in sorted(self.history.trips, key=lambda x: x["t"]):
+            for b in tr.get("betalinger") or []:
+                navn_b = (b.get("butik") or "").strip()
+                if not navn_b or not b.get("varer") or not b.get("t"):
+                    continue
+                if butik and navn_b.lower() != butik.strip().lower():
+                    continue
+                try:
+                    slut = datetime.fromisoformat(b["t"])
+                except (TypeError, ValueError):
+                    continue
+                if slut.tzinfo is None:
+                    slut = dt_util.as_local(slut)
+                if slut < graense:
+                    continue
+                varer = []
+                for n in b["varer"]:
+                    header = self.indkob.learned_header(n)
+                    k = self._kat_noegle(header) if header else kat.gaet(n)
+                    varer.append((n, k))
+                if self._laer_butik(navn_b, varer, slut) is not None:
+                    laert.add(navn_b.lower())
+        return len(laert)
+
+    def _butik_orden_ud(self) -> list[dict]:
+        return [{"navn": v["navn"], "orden": v["orden"], "kilde": v.get("kilde", "laert"), "ture": v.get("ture", 0),
+                 "sidst": v.get("sidst")}
+                for v in sorted(self.butik_orden.values(), key=lambda x: x.get("sidst") or "", reverse=True)]
+
+    @callback
+    def saet_butik_orden(self, butik: str, orden: list[str], user: str | None = None) -> dict:
+        """Jeres egen rækkefølge for butikken (læres ikke om af nye indkøb)."""
+        butik = (butik or "").strip()[:60]
+        orden = [k for k in dict.fromkeys((x or "").strip() for x in orden) if k][:40]
+        if not butik or len(orden) < 2:
+            raise ValueError("Vælg en butik og mindst to kategorier")
+        key = butik.lower()
+        bo = self.butik_orden.get(key) or {}
+        iso = dt_util.now().isoformat(timespec="seconds")
+        self.butik_orden[key] = {"navn": bo.get("navn") or butik, "orden": orden, "kilde": "manuel",
+                                 "ture": bo.get("ture", 0), "t": iso, "sidst": bo.get("sidst") or iso}
+        self._log(user, "indkob", f"satte rækkefølgen i {self.butik_orden[key]['navn']}", key=f"orden:{key}", window=300)
+        self._save()
+        self._notify()
+        return self.butik_orden[key]
+
+    @callback
+    def nulstil_butik_orden(self, butik: str, user: str | None = None) -> dict | None:
+        """Glem jeres rækkefølge for butikken og lær den igen af indkøbshistorikken."""
+        key = (butik or "").strip().lower()
+        navn_b = (self.butik_orden.pop(key, None) or {}).get("navn") or butik.strip()
+        self._laer_fra_historik(butik)
+        self._log(user, "indkob", f"nulstillede rækkefølgen i {navn_b}", key=f"orden:{key}", window=300)
+        self._save()
+        self._notify()
+        return self.butik_orden.get(key)
 
     @callback
     def edit_store(self, stop_id: str, butik: str, beloeb: float | None, user: str | None = None) -> dict:
@@ -730,7 +895,10 @@ class IndkobMadplanManager:
 
     @callback
     def update_line(self, line_id: str, user: str | None = None, *, text: str | None = None,
-                    checked: bool | None = None, line_type: str | None = None, note: str | None = None) -> dict:
+                    checked: bool | None = None, line_type: str | None = None, note: str | None = None,
+                    dedupe: bool = False) -> dict:
+        """Ret en linje. `dedupe` (0.15.0): panelet er færdigt med at skrive i linjen – står varen
+        der allerede (ukrydset), slås de to linjer sammen (den nye forsvinder)."""
         n = self._note(note)
         nn = note or NOTE_INDKOB
         old = dict(n.get(line_id))
@@ -763,8 +931,34 @@ class IndkobMadplanManager:
                 self._log(user, nn, f'gjorde "{name}" til overskrift')
             elif old["type"] == "header":
                 self._log(user, nn, f'gjorde "{name}" til vare')
+        if dedupe and (fl := self._flet_dublet(n, ln, user, nn)) is not None:
+            self.indkob_changed(user, note)
+            return fl
         self.indkob_changed(user, note)
         return ln
+
+    def _flet_dublet(self, n: ShoppingNote, ln: dict, user: str | None, nn: str) -> dict | None:
+        """0.15.0: samme vare (normaliseret navn, også ental/flertal) en anden ukrydset linje → fjern den
+        nye linje. Er den eksisterende krydset af (i kurven/købt), flettes der ikke – så røres købet ikke."""
+        if ln["type"] != TYPE_ITEM or ln["checked"] or not ln["text"].strip():
+            return None
+        key = normalize(ln["text"])
+        if not key:
+            return None
+        andre = [x for x in n.items() if x["id"] != ln["id"] and not x["checked"]]
+        ex = next((x for x in andre if normalize(x["text"]) == key), None) or next(
+            (x for x in andre if kat.stamme(normalize(x["text"])) == kat.stamme(key)), None)
+        if ex is None:
+            return None
+        idx = n.index(ln["id"])
+        prev = n.lines[idx - 1]["id"] if idx > 0 else None
+        n.delete([ln["id"]])
+        u = user or "Ukendt"
+        last = self._last_log(f"txt:{ln['id']}", u, 300)
+        if last is not None and not last.get("fra"):
+            self.log.remove(last)  # "tilføjede …" – linjen findes ikke længere
+        self._log(user, nn, f'skrev "{ln["text"].strip()}", som stod der i forvejen – slået sammen med "{ex["text"].strip()}"')
+        return {**ex, "flettet": True, "flettet_fra": {"id": ln["id"], "text": ln["text"], "prev": prev}}
 
     @callback
     def delete_lines(self, line_ids: list[str], user: str | None = None, note: str | None = None) -> None:
@@ -961,6 +1155,9 @@ class IndkobMadplanManager:
             return d  # rester: som hidtil
         alts = self.fryser_for_navn(dag.ret)
         if alts is None:
+            # 0.15.0: en ReciMe-ret – jeres valg under Retter, ellers opskriftens kød fra fryseren
+            alts = self._fryser_opskrift(dag)
+        if alts is None:
             return d
         d["fryser"] = alts
         koed = [a for a in alts if a != INTET_FRA_FRYSER]
@@ -969,6 +1166,41 @@ class IndkobMadplanManager:
             return d
         d.update(kraever_optoening=True, koed=[" eller ".join(koed_i_tekst(koed, dag.raw or ""))])
         return d
+
+    def fryser_auto(self, ret_id: str) -> list[str]:
+        """0.15.0: opskriftens kød fra fryseren (det, Varer til ugen fravælger som "kød fra fryseren")."""
+        ud: list[str] = []
+        for v in self.bank.varer(ret_id) or []:
+            navn_v = (v.get("navn") or "").strip().lower()
+            if navn_v and er_fryserkoed(navn_v) and navn_v not in ud:
+                ud.append(navn_v)
+        return ud[:6]
+
+    def _fryser_opskrift(self, dag: Dag) -> list[str] | None:
+        """0.15.0: kød fra fryseren, når dagens ret er en ReciMe-opskrift (None = ikke en opskrift).
+
+        Jeres eget valg på opskriften (Retter → ❄ Fra fryseren) går forud; ellers opskriftens kød.
+        Svaret gemmes pr. madplan-/bank-version og dato (kaldes ved hver opdatering af sensorerne)."""
+        key = (self.madplan_note.version, self.bank.version, id(self.bank))
+        cache = getattr(self, "_fryser_op_cache", None)
+        if not cache or cache[0] != key:
+            cache = (key, {})
+            self._fryser_op_cache = cache
+        if dag.dato in cache[1]:
+            return cache[1][dag.dato]
+        res: list[str] | None = None
+        try:
+            a = next((x for x in pl.laes_historik({dag.dato: dag}) if x.slags == "ret"), None)
+            if a is not None:
+                ret_id, _navn, kilde = self._ret_for_dag(a)
+                if kilde == "opskrift" and ret_id and ret_id.startswith("r:"):
+                    egen = self.bank.fryser(ret_id)
+                    res = egen if egen is not None else self.fryser_auto(ret_id)
+        except Exception:  # noqa: BLE001 – påmindelsen må aldrig vælte sensorerne
+            _LOGGER.exception("Kunne ikke finde kød fra fryseren til %s", dag.dato)
+            res = None
+        cache[1][dag.dato] = res
+        return res
 
     def frost_dag(self) -> dict | None:
         return self.dag(1 if self.frost_tomorrow else 0)
@@ -1136,6 +1368,7 @@ class IndkobMadplanManager:
                 "har_vi_altid": k["har_vi_altid"], "ikke_tolket": k["ikke_tolket"],
                 "original": [op.original_tekst(ln) for ln in r["linjer"]],
                 "rettet_t": e.get("t"), "rettet_af": e.get("af"), "fryser": b.fryser(ret_id),
+                "fryser_auto": self.fryser_auto(ret_id),  # 0.15.0: opskriftens kød fra fryseren
                 "gange": (self._opskrift_hist()[0].get(ret_id) or {}).get("antal", 0),
                 "sidst": (self._opskrift_hist()[0].get(ret_id) or {}).get("sidst"),
             }
@@ -1977,6 +2210,30 @@ class IndkobMadplanManager:
         self.indkob_changed(user)
         return ud
 
+    def _fast_tilbage(self, rester: list[dict], user: str | None) -> list[dict]:
+        """0.15.0: faste varer, som "Nok" i køleskabet holdt væk, kommer på listen igen, når resten
+        sættes til "Lidt" eller tages ud af køleskabet. Står varen der allerede – eller siger en
+        anden rest stadig "Nok" – sker intet. Returnerer de linjer, der kom på listen."""
+        if not rester:
+            return []
+        ids = {r["id"] for r in rester}
+        andre_nok = [r for r in self.koleskab if r.get("nok") and r["id"] not in ids]
+        ud: list[dict] = []
+        for b in self.basis.items():
+            if self.indkob.find_item(b["text"]) is not None:
+                continue
+            if not any(kol.passer(r["navn"], b["text"]) for r in rester):
+                continue
+            if any(kol.passer(r["navn"], b["text"]) for r in andre_nok):
+                continue
+            header = self.indkob.learned_header(b["text"]) or self.basis.category_of(b["id"])
+            ud.append(self.indkob.add_under(b["text"], header))
+        if ud:
+            self._log(user, "indkob", "satte " + _names([x["text"] for x in ud])
+                      + " på listen igen – ikke længere nok i køleskabet")
+            self.indkob_changed(user)
+        return ud
+
     @callback
     def koleskab_tilfoej(self, navne: list[str], user: str | None = None, *, nok: bool | None = None,
                          liste: bool = True) -> dict:
@@ -2026,21 +2283,27 @@ class IndkobMadplanManager:
         self._log(user, "koleskab", f'satte "{it["navn"]}" i køleskabet til {"nok" if nok else "lidt (købes stadig)"}',
                   key=f"kol:{rest_id}", window=120)
         fjernet = self._fjern_fra_listen([it], user) if nok else []
+        tilbage = [] if nok else self._fast_tilbage([it], user)  # 0.15.0
         self._save()
         self._notify()
-        return {"rest": it, "fjernet": fjernet}
+        return {"rest": it, "fjernet": fjernet, "tilbage": tilbage}
 
     @callback
     def koleskab_fjern(self, rest_ids: list[str], user: str | None = None) -> dict:
-        """Tag rester ud af køleskabet (brugt, smidt ud …). Indkøbslisten røres ikke."""
+        """Tag rester ud af køleskabet (brugt, smidt ud …).
+
+        0.15.0: en fast vare, som resten ("Nok") holdt væk fra indkøbslisten, kommer på listen igen.
+        Andre varer på listen røres ikke."""
         ids = set(rest_ids)
         ud = [x for x in self.koleskab if x["id"] in ids]
+        tilbage: list[dict] = []
         if ud:
             self.koleskab = [x for x in self.koleskab if x["id"] not in ids]
             self._log(user, "koleskab", "tog " + _names([x["navn"] for x in ud]) + " ud af køleskabet")
+            tilbage = self._fast_tilbage([x for x in ud if x.get("nok")], user)
             self._save()
             self._notify()
-        return {"fjernet": ud}
+        return {"fjernet": ud, "tilbage": tilbage}
 
     @callback
     def skjul_ret(self, navn: str, skjul: bool = True, user: str | None = None) -> list[str]:
@@ -2198,6 +2461,7 @@ class IndkobMadplanManager:
                     ],
                     "koebt": self.bought(),
                 },
+                "butik_orden": self._butik_orden_ud(),  # 0.15.0
             },
             "basis": {
                 **{k: v for k, v in self.basis.as_dict().items() if k != "categories"},
