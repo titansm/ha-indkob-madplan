@@ -14,8 +14,11 @@
  * I planlæggeren (0.13.0) er køleskabet foldet sammen til én linje ("🧊 Køleskab · 20 varer" +
  * hvilke ugens retter bruger); dagene viser selv 🧊. Tryk på linjen folder hele listen (Nok/Lidt, ×)
  * og feltet ud. Noten "Køleskab" er uændret (altid hele listen).
+ *
+ * 0.15.1: tomt køleskab i planlæggeren vises som påmindelse ("Husk resterne i køleskabet"), og
+ * `nulstillet(res)` viser, hvilke rester fra forrige madplan der blev taget ud – med Fortryd.
  */
-import { esc } from "./im-common.js?v=0.15.0";
+import { esc } from "./im-common.js?v=0.15.1";
 
 const KORT = { Mandag: "man.", Tirsdag: "tirs.", Onsdag: "ons.", Torsdag: "tors.", Fredag: "fre.", "Lørdag": "lør.", "Søndag": "søn." };
 const lf = (s) => (s && !/^[A-ZÆØÅ]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");
@@ -92,10 +95,12 @@ class ImKoleskab extends HTMLElement {
           <span class="fl">${aaben ? "Skjul" : "Vis alle"}<span class="chev" aria-hidden="true">›</span></span>
         </button>`;
     } else {
+      // 0.15.1: tomt køleskab i planlæggeren = påmindelse om at skrive resterne til den nye madplan
       r.getElementById("hoved").innerHTML = planner
-        ? `<b>🧊 Rester i køleskabet</b><small>Skriv det, I har tilbage – så bruger forslagene det først</small>`
+        ? `<b>🧊 Husk resterne i køleskabet</b><small>Hvad har I tilbage? Skriv det her, før I gemmer – så bruger forslagene det først</small>`
         : "";
     }
+    r.querySelector(".kol").classList.toggle("paamind", planner && n === 0);
     r.getElementById("hoved").hidden = !planner;
     r.getElementById("tilf").hidden = !aaben;
     r.getElementById("tom").textContent = n ? "" : planner ? "" : "Intet i køleskabet. Skriv det, I har tilbage – fx en halv pakke fløde eller lidt champignon.";
@@ -174,6 +179,28 @@ class ImKoleskab extends HTMLElement {
       }
       this._besked(`${opremsning(navne)} står på indkøbslisten igen`);
     }, 10000);
+  }
+
+  /* 0.15.1: planlæggeren har tømt køleskabet for forrige madplans rester – besked + Fortryd */
+  nulstillet(res) {
+    const ud = res?.fjernet || [];
+    if (!ud.length) return;
+    this._liste = this._liste.filter((x) => !ud.some((u) => u.id === x.id));
+    this._render();
+    const igen = (res.tilbage || []).map((l) => l.text);
+    const navne = ud.map((x) => lf(x.navn));
+    const vis = navne.length > 4 ? `${navne.slice(0, 3).join(", ")} og ${navne.length - 3} andre` : opremsning(navne);
+    this._besked(`Køleskabet er tømt fra sidste madplan: ${vis}${igen.length ? ` · ${opremsning(igen)} står på indkøbslisten igen` : ""}`, async () => {
+      const send = async (liste, nok, rorListen) => {
+        for (let i = 0; i < liste.length; i += 20) {
+          await this.store.send("koleskab/tilfoej", { navne: liste.slice(i, i + 20).map((x) => x.navn), nok, liste: rorListen });
+        }
+      };
+      await send(ud.filter((x) => x.nok), true, igen.length > 0);
+      await send(ud.filter((x) => !x.nok), false, false);
+      this._besked(`${ud.length} ${ud.length === 1 ? "rest" : "rester"} er tilbage i køleskabet`, null, 4000);
+      this._aendret();
+    }, 15000);
   }
 
   /* ------------------------------------------------------------ handlinger */
@@ -273,6 +300,9 @@ const CSS = `
   button:focus-visible, input:focus-visible { outline: 2px solid var(--im-acc); outline-offset: 2px; }
   .kol { display: flex; flex-direction: column; gap: 8px; }
   :host([planner]) .kol { background: var(--im-bg); border-radius: 16px; padding: 10px 12px 12px 14px; }
+  :host([planner]) .kol.paamind { background: var(--im-frost-bg, rgba(109,182,230,.14)); box-shadow: inset 0 0 0 1.5px var(--im-frost, #6db6e6); }
+  .kol.paamind .hoved b { color: var(--im-frost, #6db6e6); }
+  .kol.paamind .besked { background: var(--im-bg); }
   .hoved { display: flex; flex-direction: column; gap: 1px; }
   .hoved b { font-size: 15px; }
   .hoved small { font-size: 13px; color: var(--im-dim); }

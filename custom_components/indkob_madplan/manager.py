@@ -2009,6 +2009,9 @@ class IndkobMadplanManager:
         ny_tekst, info = self._indsaet_i_tekst(n.text, ud, today)
         self.set_madplan(ny_tekst, n.version, user)
         self._log(user, "madplan", f"planlagde uge {dage[0][0].isocalendar()[1]} med ugeplanlæggeren", key="madplan:plan")
+        # 0.15.1: rester skrevet før dette tidspunkt hører til denne madplan – ryddes ved næste planlægning
+        self.planner_data["sidst_planlagt"] = dt_util.now().isoformat(timespec="seconds")
+        self._save()
         return {"version": self.madplan_note.version, **info}
 
     @staticmethod
@@ -2303,6 +2306,49 @@ class IndkobMadplanManager:
             tilbage = self._fast_tilbage([x for x in ud if x.get("nok")], user)
             self._save()
             self._notify()
+        return {"fjernet": ud, "tilbage": tilbage}
+
+    def _sidst_planlagt(self) -> datetime | None:
+        """0.15.1: hvornår ugeplanlæggeren sidst gemte en uge i madplanen.
+
+        Gemmes ved `indsaet_uge`; før 0.15.1 findes det kun i redigeringsloggen ("planlagde uge …")."""
+        t = dt_util.parse_datetime(self.planner_data.get("sidst_planlagt") or "")
+        if t is None:
+            sidst = next((x for x in reversed(self.log) if x.get("k") == "madplan:plan"), None)
+            t = dt_util.parse_datetime(sidst["t"]) if sidst else None
+        if t is not None and t.tzinfo is None:
+            t = t.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        return t
+
+    @callback
+    def koleskab_ny_planlaegning(self, user: str | None = None) -> dict:
+        """0.15.1 (Titan 28/10): køleskabet nulstilles fra madplan til madplan.
+
+        Kaldes, når ugeplanlæggeren åbnes: rester, der kom i køleskabet før forrige "Gem i madplanen",
+        hørte til den madplan og tages ud. Rester skrevet bagefter (til den uge, der planlægges nu)
+        bliver. Faste varer, som "Nok" holdt væk fra indkøbslisten, kommer på listen igen (som ×).
+        """
+        graense = self._sidst_planlagt()
+        if graense is None or not self.koleskab:
+            return {"fjernet": [], "tilbage": []}
+
+        def gammel(it: dict) -> bool:
+            t = dt_util.parse_datetime(it.get("t") or "")
+            if t is None:
+                return True
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            return t < graense
+
+        ud = [x for x in self.koleskab if gammel(x)]
+        if not ud:
+            return {"fjernet": [], "tilbage": []}
+        ids = {x["id"] for x in ud}
+        self.koleskab = [x for x in self.koleskab if x["id"] not in ids]
+        self._log(user, "koleskab", "tømte køleskabet til den nye madplan: " + _names([x["navn"] for x in ud]))
+        tilbage = self._fast_tilbage([x for x in ud if x.get("nok")], user)
+        self._save()
+        self._notify()
         return {"fjernet": ud, "tilbage": tilbage}
 
     @callback

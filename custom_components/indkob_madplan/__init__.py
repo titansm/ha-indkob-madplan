@@ -67,7 +67,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_omregning__hent, ws_omregning__saet, ws_opskrifter__importer,
         ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
         ws_madplan__kladde__hent, ws_madplan__kladde__gem, ws_madplan__kladde__slet,
-        ws_koleskab__tilfoej, ws_koleskab__saet, ws_koleskab__fjern,
+        ws_koleskab__tilfoej, ws_koleskab__saet, ws_koleskab__fjern, ws_koleskab__ny_planlaegning,
         ws_madplan__versioner, ws_butik__orden__saet, ws_butik__orden__nulstil,
     ):
         websocket_api.async_register_command(hass, cmd)
@@ -468,6 +468,12 @@ def ws_koleskab__saet(m: IndkobMadplanManager, msg: dict, user: str | None) -> d
 @_ws({vol.Required("rest_ids"): vol.All([str], vol.Length(min=1, max=50))})
 def ws_koleskab__fjern(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.koleskab_fjern(msg["rest_ids"], user)
+
+
+# 0.15.1: ugeplanlæggeren åbnes – rester fra forrige madplan tages ud af køleskabet
+@_ws({})
+def ws_koleskab__ny_planlaegning(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    return m.koleskab_ny_planlaegning(user)
 
 
 PAYMENTS = vol.All([{

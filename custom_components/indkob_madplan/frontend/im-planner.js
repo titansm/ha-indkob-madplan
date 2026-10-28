@@ -20,9 +20,13 @@
  * Køleskabet (0.12.5): øverst står resterne i køleskabet (<im-koleskab planner>). Retter, der bruger
  * dem, foreslås først og lægges på de første dage. Ændres køleskabet, får de dage, I ikke selv har
  * valgt, et nyt bud (som "Bland").
+ *
+ * Fra madplan til madplan (0.15.1): når planlæggeren åbnes, tager backenden de rester ud, der kom i
+ * køleskabet før forrige "Gem i madplanen" (koleskab/ny_planlaegning); er køleskabet tomt, står der
+ * en påmindelse om at skrive resterne.
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.15.0";
-import "./im-koleskab.js?v=0.15.0";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.15.1";
+import "./im-koleskab.js?v=0.15.1";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -126,6 +130,14 @@ class UgePlan extends HTMLElement {
     kol.setup(store);
     kol.state = state;
     requestAnimationFrame(() => this.shadowRoot.querySelector(".ark")?.classList.add("inde"));
+    // 0.15.1: køleskabet nulstilles fra madplan til madplan – rester fra forrige planlægning tages ud,
+    // før forslagene laves (med besked + Fortryd i køleskabet)
+    try {
+      const nul = await store.send("koleskab/ny_planlaegning", {});
+      if (nul?.fjernet?.length) kol.nulstillet(nul);
+    } catch (e) {
+      /* ældre backend eller ingen forbindelse: planlæg med køleskabet som det er */
+    }
     let k = null;
     try {
       k = await store.send("madplan/kladde/hent", {});
@@ -477,7 +489,7 @@ class UgePlan extends HTMLElement {
         <p>"Andet bud" giver op til 30 forskellige bud pr. dag – de bedste oftest først, en ReciMe-ret ca. hvert 4. bud, og ikke de samme forrest hver dag. Tryk på en ret for at se alle bud eller søge i jeres retter og ReciMe, og vælg "Foreslå ikke igen" for retter, I er færdige med.</p>
         <p>Portion: tryk på retten og vælg Normal eller Dobbelt. Dobbelt kan være uden en bestemt dag (fryser/frokost) eller med rester på en af de næste dage.</p>
         <p>Kød fra fryseren: kan en ret laves med flere slags kød (fx burger), vælger I under retten, hvilket det bliver – så siger påmindelsen om at tage kød op det rigtige.</p>
-        <p>Køleskabet: retter, der bruger det, I har tilbage, foreslås først og lægges på de første dage, så intet bliver dårligt. Retten skal have en indkøbsliste (Noter → Retter) eller være en af planlæggerens kendte retter. Ændrer I køleskabet, får de dage, I ikke selv har valgt, et nyt bud.</p>
+        <p>Køleskabet: retter, der bruger det, I har tilbage, foreslås først og lægges på de første dage, så intet bliver dårligt. Retten skal have en indkøbsliste (Noter → Retter) eller være en af planlæggerens kendte retter. Ændrer I køleskabet, får de dage, I ikke selv har valgt, et nyt bud. Køleskabet gælder én madplan ad gangen: når planlæggeren åbnes til en ny uge, tages resterne fra forrige planlægning ud (Fortryd i beskeden), så I skriver det, I har tilbage nu.</p>
       </details>`;
     this._kladdeSenere();
     r.getElementById("bund").innerHTML = `

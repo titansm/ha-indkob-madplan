@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.15.0";
+export const VERSION = "0.15.1";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
