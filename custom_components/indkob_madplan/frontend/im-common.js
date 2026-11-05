@@ -281,6 +281,11 @@ export class Checklist {
     });
   }
 
+  /* 0.17.0: send ventende linjetekster nu (fx når appen lukkes eller skjules) */
+  flushAll() {
+    for (const id of [...this.dirty.keys()]) this._flush(id);
+  }
+
   /* Skift mellem redigering og indkøbstilstand (rækkerne bygges om). */
   setMode({ editable, tapToggle = false, swipe = null }) {
     for (const id of new Set([...this.dirty.keys(), ...this._edited])) this._flush(id, true);
@@ -687,6 +692,12 @@ export class Checklist {
     this._plusAdd(tx.closest("[data-plus]").dataset.plus, text);
   }
 
+  /* 0.17.0: kunne varen ikke tilføjes, kommer teksten tilbage i +-feltet (står der intet nyt) */
+  _plusRestore(headerId, text) {
+    const tx = this.plusRows?.get(headerId)?.querySelector("input");
+    if (tx && !tx.value.trim()) tx.value = text;
+  }
+
   _plusBlur(tx, headerId) {
     const text = tx.value.trim();
     tx.value = "";
@@ -714,6 +725,7 @@ export class Checklist {
         else this.flash(res.id);
         this.onPlusAdded?.(res, text);
       } catch (err) {
+        this._plusRestore(headerId, text);
         this.onPlusAdded?.(null, text);
       }
     });

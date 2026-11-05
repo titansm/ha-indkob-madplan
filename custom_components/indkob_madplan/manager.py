@@ -132,6 +132,9 @@ class IndkobMadplanManager:
         # Rækkefølge pr. butik (0.15.0): navn (små bogstaver) -> {"navn", "orden": [kategori-nøgler],
         # "kilde": "laert" | "manuel", "ture", "t", "sidst"}
         self.butik_orden: dict[str, dict] = {}
+        # 0.17.0: linjer, der skrives i lige nu (linje-id -> tidspunkt). Deres omdøbning logges først
+        # i statistikken, når linjen er færdig (dedupe), så autofuldførelsen ikke fyldes med halve ord
+        self._skriver: dict[str, datetime] = {}
 
     # ------------------------------------------------------------ options
     @property
@@ -406,7 +409,10 @@ class IndkobMadplanManager:
         ]
 
     def _feed_history(self) -> None:
-        new = self.history.apply_items(self._history_items(), dt_util.now())
+        now = dt_util.now()
+        graense = now - timedelta(minutes=10)
+        self._skriver = {k: t for k, t in self._skriver.items() if t >= graense}
+        new = self.history.apply_items(self._history_items(), now, skriver=set(self._skriver))
         if new:
             _LOGGER.debug("Indkøbshændelser: %s", new)
 
@@ -886,12 +892,14 @@ class IndkobMadplanManager:
         return line
 
     def known_names(self) -> list[str]:
-        """Varenavne til autofuldførelse: alt der står på listen nu + alt der er købt før."""
+        """Varenavne til autofuldførelse: alt der står på listen nu + alt der er købt før.
+        0.17.0: navne, der kun er skrevet (aldrig købt) og ikke står på listen, kommer ikke med."""
         seen: dict[str, str] = {}
         for ln in self.indkob.items() + self.basis.items():
             seen.setdefault(ln["text"].strip().lower(), ln["text"].strip())
-        for name in self.history.names.values():
-            if name.strip():
+        koebt = {e["k"] for e in self.history.events if e.get("type") == "buy"}
+        for key, name in self.history.names.items():
+            if key in koebt and name.strip():
                 seen.setdefault(name.strip().lower(), name.strip())
         return sorted(seen.values(), key=str.lower)[:400]
 
@@ -925,6 +933,11 @@ class IndkobMadplanManager:
         n = self._note(note)
         nn = note or NOTE_INDKOB
         old = dict(n.get(line_id))
+        if n is self.indkob and text is not None:
+            if dedupe:  # færdig med at skrive: omdøbningen logges nu (én gang)
+                self._skriver.pop(line_id, None)
+            elif text.strip() != old["text"].strip():
+                self._skriver[line_id] = dt_util.now()
         ln = n.update(line_id, text=text, checked=checked if n is self.indkob else False, line_type=line_type)
         u = user or "Ukendt"
         name = (ln["text"].strip() or old["text"].strip())

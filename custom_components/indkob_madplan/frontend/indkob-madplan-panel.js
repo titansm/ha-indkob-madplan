@@ -96,7 +96,13 @@ class IndkobMadplanPanel extends HTMLElement {
     // ?pris (fx fra en notifikation efter indkøbet) åbner "Hvad blev indkøbet?"
     this._wantPris = new URLSearchParams(location.search).has("pris");
     this._scrollRestored = false;
-    this._onHide = () => {
+    this._onHide = (e) => {
+      // 0.17.0: gem madplanen og ventende linjetekster, før appen skjules eller lukkes
+      if (document.visibilityState === "hidden" || e?.type === "pagehide") {
+        this._flushMadplan();
+        this._cl?.flushAll();
+        this._clb?.flushAll();
+      }
       if (document.visibilityState === "hidden") this._saveScroll();
       if (document.visibilityState === "hidden" && this._open === "indkob" && location.pathname.startsWith("/indkob-madplan")) markResume();
     };

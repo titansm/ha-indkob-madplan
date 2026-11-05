@@ -265,7 +265,12 @@ class IndkobMadplanCard extends HTMLElement {
       const kat = ln.kategori ? " · " + C.prettyHeader(ln.kategori) : "";
       this._kvit(ln.fandtes ? `"${ln.text}" står allerede på listen${kat}` : `✓ ${ln.text} er tilføjet${kat}`);
     } catch (err) {
-      this._kvit("Kunne ikke tilføje");
+      // 0.17.0: teksten må ikke gå tabt – den kommer tilbage i feltet (står der intet nyt)
+      if (inp && !inp.value.trim()) {
+        inp.value = text;
+        this._renderAutofill();
+      }
+      this._kvit(`Kunne ikke tilføje "${text}" – prøv igen`);
     }
   }
 

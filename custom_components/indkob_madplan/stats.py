@@ -145,8 +145,11 @@ class History:
         }
 
     # ------------------------------------------------------------------ diff
-    def apply_items(self, items: list[dict], now: datetime) -> list[dict]:
-        """Sammenlign med forrige snapshot og log køb/tilføjelser. Returnér nye hændelser."""
+    def apply_items(self, items: list[dict], now: datetime, skriver: set[str] | None = None) -> list[dict]:
+        """Sammenlign med forrige snapshot og log køb/tilføjelser. Returnér nye hændelser.
+
+        0.17.0: `skriver` = linjer, der skrives i lige nu – en omdøbning af dem logges ikke endnu
+        (snapshot beholder den gamle tekst), så kun det færdige navn tæller."""
         new_snap: dict[str, dict] = {}
         for it in items:
             uid = it.get("uid") or it.get("summary")
@@ -179,6 +182,9 @@ class History:
                 if not self._undo_buy(key, now):
                     new_events.append(self._event("add", key, summary, now))
             elif prev["s"] != summary and cur["st"] != "completed":
+                if skriver and uid in skriver:
+                    new_snap[uid] = prev  # 0.17.0: endnu ikke færdigskrevet
+                    continue
                 # omdøbt vare: behandl som ny tilføjelse hvis nøglen ændrer sig
                 if normalize(prev["s"]) != key:
                     new_events.append(self._event("add", key, summary, now))
