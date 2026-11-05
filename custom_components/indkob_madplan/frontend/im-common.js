@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.16.0";
+export const VERSION = "0.16.1";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -984,8 +984,10 @@ export function aftenHTML(mp, { compact = false, weekOpen = false, onlyToday = f
 }
 
 /* Skabelon til en ny uge. Den fortsætter dagen efter den sidste planlagte dag (jeres uger
- * starter ikke nødvendigvis mandag), dog aldrig før i dag, og får ugenummeret for den dag. */
-export function nyUgeSkabelon(today = new Date(), sidsteDato = null, days = 7) {
+ * starter ikke nødvendigvis mandag), dog aldrig før i dag, og får ugenummeret for den dag.
+ * 0.16.1: `uge` fra serveren (ny_uge) bruges, når den findes – med fast startdag (fx fredag)
+ * er ugen fre 30/10–tor 5/11 "Uge 45", ikke ISO-ugen for fredagen. */
+export function nyUgeSkabelon(today = new Date(), sidsteDato = null, days = 7, uge = null) {
   let start = new Date(today);
   start.setHours(12, 0, 0, 0);
   if (sidsteDato) {
@@ -993,7 +995,7 @@ export function nyUgeSkabelon(today = new Date(), sidsteDato = null, days = 7) {
     d.setDate(d.getDate() + 1);
     if (d > start) start = d;
   }
-  const lines = [`Uge ${isoWeek(start)}`];
+  const lines = [`Uge ${uge || isoWeek(start)}`];
   for (let i = 0; i < days; i++) {
     const d = new Date(start);
     d.setDate(d.getDate() + i);

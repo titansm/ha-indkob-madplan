@@ -48,7 +48,7 @@ from .const import (
 )
 from .madplan import (
     _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, flet3, overlap,
-    parse_madplan, retter, scan_linjer, vindere,
+    parse_madplan, retter, scan_linjer, uge_nr, vindere,
 )
 from .notes import TYPE_ITEM, ShoppingNote, TextNote, new_id
 from . import kategorier as kat
@@ -1029,12 +1029,12 @@ class IndkobMadplanManager:
     # ------------------------------------------------------------ madplan
     def _parse_madplan(self) -> None:
         try:
-            self.madplan = parse_madplan(self.madplan_note.text, dt_util.now().date())
+            self.madplan = parse_madplan(self.madplan_note.text, dt_util.now().date(), self.uge_start)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Fejl ved læsning af madplanen")
             self.madplan = {}
         try:
-            self._overlap = overlap(self.madplan_note.text, dt_util.now().date())
+            self._overlap = overlap(self.madplan_note.text, dt_util.now().date(), self.uge_start)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Fejl ved tjek af overlappende uger")
             self._overlap = []
@@ -1114,11 +1114,11 @@ class IndkobMadplanManager:
         start = self._til_ugestart(start)
         linje = None
         try:
-            v = vindere(scan_linjer(self.madplan_note.text, today)).get(start)
+            v = vindere(scan_linjer(self.madplan_note.text, today, self.uge_start)).get(start)
             linje = v.idx if v and not v.dag.raw.strip() else None
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Ny uge: kunne ikke læse madplanen")
-        return {"start": start.isoformat(), "uge": start.isocalendar()[1], "linje": linje}
+        return {"start": start.isoformat(), "uge": uge_nr(start, self.uge_start), "linje": linje}
 
     def dag(self, offset: int) -> dict | None:
         d = dt_util.now().date() + timedelta(days=offset)
@@ -1694,7 +1694,7 @@ class IndkobMadplanManager:
             del x["orden"]
         return {
             "start": start.isoformat(), "slut": slut.isoformat(), "dage": dage,
-            "uge": start.isocalendar()[1], "perioder": perioder,
+            "uge": uge_nr(start, self.uge_start), "perioder": perioder,
             "dage_liste": ud_dage, "varer": ud, "har_vi_altid": skjult,
             "mangler": [x for x in ud_dage if x["slags"] == "ret" and not x["antal"]],
             "madplan_version": self.madplan_note.version,
@@ -1977,7 +1977,7 @@ class IndkobMadplanManager:
         top = sorted(model.profiler.values(), key=lambda p: -p.vaegt)[:5]
         uger = sorted({a.dato.isocalendar()[:2] for a in model.aftener})
         return {
-            "start": start.isoformat(), "dage": dage, "seed": seed, "uge": start.isocalendar()[1],
+            "start": start.isoformat(), "dage": dage, "seed": seed, "uge": uge_nr(start, self.uge_start),
             "kalender": self.plan_kalender,
             "standard_dage": model.blok_laengde,
             "grundlag": {
@@ -2031,7 +2031,7 @@ class IndkobMadplanManager:
             base = self._madplan_tekst(base_version)
             if base is None:
                 raise ConflictError
-            vb, vn = vindere(scan_linjer(base, today)), vindere(scan_linjer(n.text, today))
+            vb, vn = vindere(scan_linjer(base, today, self.uge_start)), vindere(scan_linjer(n.text, today, self.uge_start))
             for d, _ln in dage:
                 rb = vb[d].dag.raw.strip() if d in vb else ""
                 rn = vn[d].dag.raw.strip() if d in vn else ""
@@ -2042,25 +2042,27 @@ class IndkobMadplanManager:
             # Linjen kommer fra panelet; sikr at den starter med den rigtige ugedag
             body = ln.split(":", 1)[1].strip() if ":" in ln[:10] else ln
             ud.append((d, f"{UGEDAGE[d.weekday()]}: {body}".rstrip()))
-        ny_tekst, info = self._indsaet_i_tekst(n.text, ud, today)
+        ny_tekst, info = self._indsaet_i_tekst(n.text, ud, today, self.uge_start)
         self.set_madplan(ny_tekst, n.version, user)
-        self._log(user, "madplan", f"planlagde uge {dage[0][0].isocalendar()[1]} med ugeplanlæggeren", key="madplan:plan")
+        self._log(user, "madplan", f"planlagde uge {uge_nr(dage[0][0], self.uge_start)} med ugeplanlæggeren", key="madplan:plan")
         # 0.15.1: rester skrevet før dette tidspunkt hører til denne madplan – ryddes ved næste planlægning
         self.planner_data["sidst_planlagt"] = dt_util.now().isoformat(timespec="seconds")
         self._save()
         return {"version": self.madplan_note.version, **info}
 
     @staticmethod
-    def _indsaet_i_tekst(tekst: str, dage: list[tuple[date, str]], today: date) -> tuple[str, dict]:
-        """Sæt dag-linjer ind i madplan-teksten uden at røre andre linjer (0.13.0)."""
+    def _indsaet_i_tekst(tekst: str, dage: list[tuple[date, str]], today: date,
+                         uge_start: int | None = None) -> tuple[str, dict]:
+        """Sæt dag-linjer ind i madplan-teksten uden at røre andre linjer (0.13.0).
+        0.16.1: ugenummer og datoer følger ugens startdag (`uge_start`)."""
         def ny_blok(rest: list[tuple[date, str]], gammel: str) -> str:
-            blok = f"Uge {rest[0][0].isocalendar()[1]}\n" + "\n".join(x for _d, x in rest)
+            blok = f"Uge {uge_nr(rest[0][0], uge_start)}\n" + "\n".join(x for _d, x in rest)
             gammel = gammel.strip()
             return blok + ("\n\n" + gammel if gammel else "") + "\n"
 
         if not tekst.strip() or any(ch in tekst for ch in _ANDRE_LINJESKIFT):
             return ny_blok(dage, tekst), {"erstattet": 0, "indsat": 0, "ny_blok": True}
-        linjer = scan_linjer(tekst, today)
+        linjer = scan_linjer(tekst, today, uge_start)
         vind = vindere(linjer)
         blokke: dict[int, list] = {}
         for ln in linjer:

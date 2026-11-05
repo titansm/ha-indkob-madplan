@@ -10,7 +10,10 @@ Format (eksempel):
     ...
 
 Regler:
-- "Uge NN" starter en blok. Første dag i blokken ligger i ISO-uge NN.
+- "Uge NN" starter en blok. Uden fast startdag ligger første dag i blokken i ISO-uge NN.
+- 0.16.1: med fast startdag (fx fredag) er "Uge NN" den fredag–torsdag-uge, hvis
+  midterste dag (mandag) ligger i ISO-uge NN – dvs. ugen fra fre 30/10 til tor 5/11
+  er "Uge 45". Første dag i blokken er den første forekomst af ugedagen i den uge.
 - Hver følgende dag er næste forekomst af den ugedag efter forrige linje,
   så en blok kan løbe fra onsdag til torsdag ugen efter.
 - Tekst før " - " er noter (fx "tit nat", "fodbold"); sidste del er retten.
@@ -123,11 +126,30 @@ def _split_entry(text: str) -> tuple[str, list[str], bool]:
     return ret, noter, stor
 
 
-def _first_date(week: int, weekday: int, today: date) -> date | None:
-    """Find datoen for ugedag i ISO-uge `week` – nyeste år der ikke ligger langt ude i fremtiden."""
+def uge_nr(start: date, uge_start: int | None = None) -> int:
+    """Ugenummeret til en blok, der starter `start` (0.16.1).
+
+    Uden fast startdag: ISO-ugen for `start` (som før). Med fast startdag (0 = mandag … 6 = søndag):
+    ISO-ugen for den midterste dag i den uge, `start` ligger i – fx fre 30/10 → mandag 2/11 → uge 45.
+    """
+    if uge_start is None:
+        return start.isocalendar()[1]
+    foerste = start - timedelta(days=(start.weekday() - uge_start) % 7)
+    return (foerste + timedelta(days=3)).isocalendar()[1]
+
+
+def _first_date(week: int, weekday: int, today: date, uge_start: int | None = None) -> date | None:
+    """Find datoen for ugedag i uge `week` – nyeste år der ikke ligger langt ude i fremtiden.
+    Uden fast startdag: ugedagen i ISO-uge `week`. Med fast startdag: den første forekomst af ugedagen
+    i den uge (fra startdagen), som `uge_nr` kalder `week` (0.16.1)."""
     for year in (today.year + 1, today.year, today.year - 1, today.year - 2):
         try:
-            d = date.fromisocalendar(year, week, weekday + 1)
+            if uge_start is None:
+                d = date.fromisocalendar(year, week, weekday + 1)
+            else:
+                mandag = date.fromisocalendar(year, week, 1)
+                foerste = mandag + timedelta(days=(uge_start + 3) % 7 - 3)
+                d = foerste + timedelta(days=(weekday - uge_start) % 7)
         except ValueError:
             continue
         if d <= today + timedelta(days=21):
@@ -135,7 +157,7 @@ def _first_date(week: int, weekday: int, today: date) -> date | None:
     return None
 
 
-def parse_madplan(text: str, today: date) -> dict[date, Dag]:
+def parse_madplan(text: str, today: date, uge_start: int | None = None) -> dict[date, Dag]:
     """Parse hele madplan-teksten og returnér {dato: Dag}."""
     blocks: list[list[Dag]] = []
     current: list[Dag] | None = None
@@ -159,7 +181,7 @@ def parse_madplan(text: str, today: date) -> dict[date, Dag]:
         wd = _DAY_ALIASES[m.group(1).lower()]
         entry = m.group(2).strip()
         if prev is None:
-            d = _first_date(week, wd, today)
+            d = _first_date(week, wd, today, uge_start)
             if d is None:
                 continue
         else:
@@ -192,7 +214,7 @@ class Linje:
     dag: Dag
 
 
-def scan_linjer(text: str, today: date) -> list[Linje]:
+def scan_linjer(text: str, today: date, uge_start: int | None = None) -> list[Linje]:
     """Alle dag-linjer med linjenummer og blok – samme regler som parse_madplan (0.13.0)."""
     ud: list[Linje] = []
     week: int | None = None
@@ -216,7 +238,7 @@ def scan_linjer(text: str, today: date) -> list[Linje]:
         wd = _DAY_ALIASES[m.group(1).lower()]
         entry = m.group(2).strip()
         if prev is None:
-            d = _first_date(week, wd, today)
+            d = _first_date(week, wd, today, uge_start)
             if d is None:
                 continue
         else:
@@ -245,10 +267,10 @@ def vindere(linjer: list[Linje]) -> dict[date, Linje]:
     return res
 
 
-def overlap(text: str, today: date) -> list[dict]:
+def overlap(text: str, today: date, uge_start: int | None = None) -> list[dict]:
     """Datoer, der står forskelligt i to eller flere uger (0.13.0, kun til advarsel):
     kun den ene linje bruges – de andre tæller ingen steder. Teksten ændres ikke."""
-    linjer = scan_linjer(text, today)
+    linjer = scan_linjer(text, today, uge_start)
     vind = vindere(linjer)
     pr_dato: dict[date, list[Linje]] = {}
     for ln in linjer:

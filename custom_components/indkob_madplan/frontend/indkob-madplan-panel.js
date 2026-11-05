@@ -2,11 +2,11 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   UGEDAGE, nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.16.0";
-import "./im-planner.js?v=0.16.0";
-import "./im-retter.js?v=0.16.0";
-import "./im-ugevarer.js?v=0.16.0";
-import "./im-koleskab.js?v=0.16.0";
+} from "./im-common.js?v=0.16.1";
+import "./im-planner.js?v=0.16.1";
+import "./im-retter.js?v=0.16.1";
+import "./im-ugevarer.js?v=0.16.1";
+import "./im-koleskab.js?v=0.16.1";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -2003,7 +2003,7 @@ class IndkobMadplanPanel extends HTMLElement {
         d.setDate(d.getDate() - 1);
         foer = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       }
-      const tpl = nyUgeSkabelon(new Date(), foer);
+      const tpl = nyUgeSkabelon(new Date(), foer, 7, nu?.uge);
       ta.value = tpl + (ta.value.trim() ? "\n\n" + ta.value : "");
       ta.dispatchEvent(new Event("input"));
       ta.focus();
