@@ -61,7 +61,20 @@ DEFAULT_KOED_ORD = [
     "moussaka", "mosoukka", "meatball", "laks", "fisk", "torsk", "rejer",
     "tun", "pulled pork", "satay", "kebab", "arayes", "nduja", "lam",
     "medister", "mørbrad", "culotte", "flæsk",
+    # 0.17.0
+    "carnitas", "osso buco", "ossobuco", "kalv", "and", "høns", "ribben", "kotelet", "steg", "chicken",
 ]
+# 0.17.0: ord, der ligner kød, men ikke er det (wienerbrød, farsdag, kødfri, "andet")
+_IKKE_KOED_RE = re.compile(r"^(wienerbrød|farsdag|kødfri|andet|andre|anderledes)", re.IGNORECASE)
+# ... og ord, der gør kødordet i samme ord eller ordet lige efter vegetarisk ("veggie burger",
+# "vegetar lasagne", "grøntsagsfrikadeller")
+_VEG_RE = re.compile(r"^(veggie|vegetar|vegan|grøntsag|plantebase|kødfri)", re.IGNORECASE)
+# Kødord, der ellers ville ramme for bredt: "and" kun som and/anden/ande…-ret (ikke "andet"),
+# "steg" kun som en steg (flæskesteg, andesteg), ikke "stegt"/"langtidsstegt"
+_SAERLIGE_KOED_RE = {
+    "and": re.compile(r"^(and|anden|andes|ande(bryst|lår|steg|confit|kød|fedt|ben|ret)\w*)$"),
+    "steg": re.compile(r"steg(en|e|ene|s)?$"),
+}
 # Rester skal typisk ikke op af fryseren ...
 DEFAULT_REST_ORD = ["rest", "rester", "tøm køleskabet"]
 # ... medmindre det eksplicit står at det er fra fryseren.
@@ -278,6 +291,8 @@ def overlap(text: str, today: date, uge_start: int | None = None) -> list[dict]:
             pr_dato.setdefault(ln.dag.dato, []).append(ln)
     ud = []
     for d in sorted(pr_dato, reverse=True):
+        if d < today:  # 0.17.0: kun datoer fra i dag og frem – gamle overlap betyder intet længere
+            continue
         v = vind.get(d)
         skjulte = [ln for ln in pr_dato[d] if v is None or (ln.idx != v.idx and ln.dag.raw.strip() != v.dag.raw.strip())]
         if not skjulte or v is None:
@@ -287,6 +302,34 @@ def overlap(text: str, today: date, uge_start: int | None = None) -> list[dict]:
             "vises": {"tekst": v.dag.raw.strip(), "uge": v.overskrift, "linje": v.idx},
             "skjult": [{"tekst": ln.dag.raw.strip(), "uge": ln.overskrift, "linje": ln.idx} for ln in skjulte],
         })
+    return ud
+
+
+def ny_uge_info(text: str, start: date, today: date, uge_start: int | None = None) -> dict:
+    """Hvor "Ny uge" skal skrive fra `start` (0.17.0).
+
+    `linje`: en tom linje for `start` står der allerede (fx Mettes skabelon) – gå til den.
+    `dage`: antal dage fra `start` til ugens slutning (7 uden fast startdag).
+    `efter`: med fast startdag og en delvist udfyldt uge: linjen (sidste dag-linje før `start` i samme
+    uge), de manglende dage skal stå efter, så de hører til den eksisterende blok. None = ny blok øverst.
+    """
+    ud: dict = {"linje": None, "efter": None, "dage": 7}
+    vind = vindere(scan_linjer(text, today, uge_start))
+    v = vind.get(start)
+    if v is not None and not v.dag.raw.strip():
+        ud["linje"] = v.idx
+    if uge_start is None:
+        return ud
+    foerste = start - timedelta(days=(start.weekday() - uge_start) % 7)
+    ud["dage"] = 7 - (start - foerste).days
+    if ud["linje"] is None and start > foerste:
+        foer = [ln for d, ln in vind.items() if foerste <= d < start]
+        if foer:
+            ud["efter"] = max(foer, key=lambda ln: ln.dag.dato).idx
+            # står der allerede en senere dag i ugen, skrives kun dagene op til den
+            senere = [d for d in vind if start < d < foerste + timedelta(days=7)]
+            if senere:
+                ud["dage"] = (min(senere) - start).days
     return ud
 
 
@@ -418,14 +461,20 @@ def kraever_optoening(
     low = f" {raw.lower()} "
     ord_ = koed_ord if koed_ord is not None else DEFAULT_KOED_ORD
     rest = rest_ord if rest_ord is not None else DEFAULT_REST_ORD
-    tokens = re.findall(r"[a-zæøåé]+", low)
+    alle = re.findall(r"[a-zæøåé]+", low)
+    # 0.17.0: vegetariske ord og ord, der kun ligner kød, tæller ikke
+    tokens = [t for i, t in enumerate(alle)
+              if not _IKKE_KOED_RE.match(t) and not _VEG_RE.match(t) and not (i and _VEG_RE.match(alle[i - 1]))]
+    low_k = f" {' '.join(tokens)} "
 
     def _hit(word: str) -> bool:
         w = word.strip().lower()
         if not w:
             return False
+        if w in _SAERLIGE_KOED_RE:
+            return any(_SAERLIGE_KOED_RE[w].search(t) for t in tokens)
         if " " in w:
-            return w in low
+            return w in low_k
         if len(w) <= 3:  # korte ord (lam, tun) kun som ordstart
             return any(t.startswith(w) for t in tokens)
         return any(w in t for t in tokens)  # sammensatte ord: kyllingeburger

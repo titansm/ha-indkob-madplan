@@ -2005,7 +2005,27 @@ class IndkobMadplanPanel extends HTMLElement {
         d.setDate(d.getDate() - 1);
         foer = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       }
-      const tpl = nyUgeSkabelon(new Date(), foer, 7, nu?.uge);
+      const dage = nu?.dage || 7;
+      if (nu && nu.efter != null && !this._mpDirty) {
+        // 0.17.0: ugen er delvist udfyldt – skriv de manglende dage i den eksisterende uge
+        const lines = ta.value.split("\n");
+        if (nu.efter < lines.length) {
+          const nye = nyUgeSkabelon(new Date(), foer, dage, nu.uge).split("\n").slice(1);
+          lines.splice(nu.efter + 1, 0, ...nye);
+          ta.value = lines.join("\n");
+          let pos = 0;
+          for (let i = 0; i <= nu.efter; i++) pos += lines[i].length + 1;
+          pos += nye[0].length;
+          ta.dispatchEvent(new Event("input"));
+          ta.focus();
+          this._markerLinje(nu.efter + 1);
+          this._mpCaret = pos;
+          ta.setSelectionRange(pos, pos);
+          this._toast(`Uge ${nu.uge} fortsætter – skriv retterne for de manglende dage`, { ms: 3500 });
+          return;
+        }
+      }
+      const tpl = nyUgeSkabelon(new Date(), foer, dage, nu?.uge);
       ta.value = tpl + (ta.value.trim() ? "\n\n" + ta.value : "");
       ta.dispatchEvent(new Event("input"));
       ta.focus();

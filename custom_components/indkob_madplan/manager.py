@@ -48,7 +48,7 @@ from .const import (
 )
 from .madplan import (
     _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, flet3, overlap,
-    parse_madplan, retter, scan_linjer, uge_nr, vindere,
+    ny_uge_info, parse_madplan, retter, scan_linjer, uge_nr, vindere,
 )
 from .notes import TYPE_ITEM, ShoppingNote, TextNote, new_id
 from . import kategorier as kat
@@ -258,7 +258,7 @@ class IndkobMadplanManager:
             self.bank = op.Opskriftsbank()
             self._bank_laast = "Opskriftsbanken kunne ikke læses"
         if self.indkob.sanitize():
-            _LOGGER.info("Indkøbslisten ryddet op (tomme linjer med flueben)")
+            _LOGGER.info("Indkøbslisten ryddet op (tomme linjer)")
         if data.get(NOTE_BASIS) is None:
             # Første start med basisliste (≤ 0.7.0): listen var en fast "master-liste",
             # så den bliver udgangspunktet for basislisten.
@@ -1107,18 +1107,19 @@ class IndkobMadplanManager:
     def ny_uge(self) -> dict:
         """0.13.0 "Ny uge": dagen efter den sidste dag med tekst (ikke tomme skabelon-dage), aldrig før i dag.
         0.16.0: med fast startdag (standard fredag) rykkes den frem til ugens første dag.
-        Står der allerede (tomme) linjer for den dag, peger `linje` på dem i stedet for en ny blok."""
+        Står der allerede (tomme) linjer for den dag, peger `linje` på dem i stedet for en ny blok.
+        0.17.0: en delvist udfyldt uge fortsættes (fx søn–tor efter fre+lør) i stedet for at springe
+        til næste startdag; `dage` = dage til ugens slutning, `efter` = linjen de skal stå efter
+        (sidste dag-linje i den uge), ellers en ny blok øverst."""
         today = dt_util.now().date()
         udfyldt = [d for d, dag in self.madplan.items() if (dag.raw or "").strip()]
         start = max(today, max(udfyldt) + timedelta(days=1)) if udfyldt else today
-        start = self._til_ugestart(start)
-        linje = None
         try:
-            v = vindere(scan_linjer(self.madplan_note.text, today, self.uge_start)).get(start)
-            linje = v.idx if v and not v.dag.raw.strip() else None
+            info = ny_uge_info(self.madplan_note.text, start, today, self.uge_start)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Ny uge: kunne ikke læse madplanen")
-        return {"start": start.isoformat(), "uge": uge_nr(start, self.uge_start), "linje": linje}
+            info = {"linje": None, "efter": None, "dage": 7}
+        return {"start": start.isoformat(), "uge": uge_nr(start, self.uge_start), **info}
 
     def dag(self, offset: int) -> dict | None:
         d = dt_util.now().date() + timedelta(days=offset)
@@ -1810,8 +1811,18 @@ class IndkobMadplanManager:
             nxt = max(planlagt) + timedelta(days=1)
             if nxt > today:
                 start = nxt
-        # 0.16.0: med fast startdag (standard fredag) starter planlægningen altid på ugens første dag
-        return self._til_ugestart(start)
+        # 0.17.0: en delvist planlagt uge fortsættes (dagen efter sidste ret) – før 0.17.0 sprang
+        # planlægningen frem til næste startdag, så resten af ugen aldrig kom med
+        return start
+
+    def _plan_dage(self, start: date) -> int:
+        """0.17.0: med fast startdag planlægges resten af ugen (en hel uge, når `start` er startdagen);
+        er der under 3 dage tilbage, kommer næste uge med."""
+        ws = self.uge_start
+        if ws is None:
+            return 0
+        rest = 7 - (start.weekday() - ws) % 7
+        return rest if rest >= 3 else rest + 7
 
     async def _kalender_events(self, start: date, slut: date) -> list[dict]:
         entity = self.plan_kalender
@@ -1855,7 +1866,7 @@ class IndkobMadplanManager:
         kendte = {navn: o.egenskaber() for navn, o in alle.items()}
         model = pl.byg_model(self.madplan, today, foer=start, kendte=kendte)
         # 0.16.0: med fast startdag planlægges en hel uge (fx fredag–torsdag)
-        dage = max(3, min(14, dage or (7 if self.uge_start is not None else model.blok_laengde)))
+        dage = max(3, min(14, dage or self._plan_dage(start) or model.blok_laengde))
         slut = start + timedelta(days=dage - 1)
         events = await self._kalender_events(start, slut)
         tags = tags or {}
@@ -2217,6 +2228,8 @@ class IndkobMadplanManager:
         self.koleskab = [it for it in self.koleskab if it["id"] not in ids]
         for it, b in brugt:
             self._log("Automatisk", "koleskab", f'fjernede "{it["navn"]}" fra køleskabet – brugt {b["ugedag"].lower()} ({b["ret"]})')
+        # 0.17.0: en fast vare, som resten ("Nok") holdt væk fra listen, kommer på listen igen
+        self._fast_tilbage([it for it, _ in brugt if it.get("nok")], "Automatisk")
         self._save()
         if notify:
             self._notify()

@@ -185,7 +185,28 @@ class History:
 
         self.snapshot = new_snap
         self.events.extend(new_events)
+        if new_events:
+            self._beskaer(now)
         return new_events
+
+    # 0.17.0: hændelsesloggen må ikke vokse uden grænse (statistikken bruger højst 12 uger + intervaller)
+    MAX_EVENTS_ALDER = timedelta(days=730)
+    MAX_EVENTS = 20000
+
+    def _beskaer(self, now: datetime) -> None:
+        """Fjern hændelser ældre end 2 år og hold loggen under MAX_EVENTS (de ældste først)."""
+        graense = now - self.MAX_EVENTS_ALDER
+        n = 0
+        for ev in self.events:  # loggen er i tidsorden – stop ved den første nye nok
+            try:
+                if datetime.fromisoformat(ev["t"]) >= graense:
+                    break
+            except (TypeError, ValueError):
+                break
+            n += 1
+        n = max(n, len(self.events) - self.MAX_EVENTS)
+        if n > 0:
+            del self.events[:n]
 
     def _event(self, typ: str, key: str, summary: str, now: datetime) -> dict:
         self.names[key] = _clean_display(summary) or display_name(key)

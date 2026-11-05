@@ -300,6 +300,11 @@ class ShoppingNote:
             if ln["type"] == TYPE_ITEM and ln["checked"] and not (ln.get("text") or "").strip():
                 ln["checked"] = False
                 changed = True
+        # 0.17.0: tomme vare-linjer (efterladt af en afbrudt tilføjelse) ryddes ved start
+        tomme = [ln for ln in self.lines if ln["type"] == TYPE_ITEM and not (ln.get("text") or "").strip()]
+        if tomme:
+            self.delete([ln["id"] for ln in tomme])
+            changed = True
         return changed
 
     def delete(self, line_ids: list[str]) -> None:
