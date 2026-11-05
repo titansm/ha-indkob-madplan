@@ -7,10 +7,26 @@
  *           vis_i_morgen (false) – med kun_i_dag: også morgendagens ret
  *           (fra kl. 18 viser den kompakte række morgendagens ret – "I morgen")
  */
-import * as C from "./im-common.js?v=0.17.0";
+
+// im-common hentes dynamisk, så kortet registreres med det samme. Med en statisk import venter
+// customElements.define på im-common; tager det over 2 s (langsom tablet/mobil), viser HA
+// "Custom element doesn't exist" som fejlkort, indtil kortet er klar.
+// Samme ?v= som kortets egen URL (= const.VERSION), så panelet og kortet deler ét modul.
+const COMMON_URL = new URL(`./im-common.js${new URL(import.meta.url).search}`, import.meta.url).href;
+let C = null;
+let commonP = null;
+const loadCommon = () =>
+  commonP || (commonP = import(COMMON_URL).then(
+    (m) => (C = m),
+    (err) => {
+      commonP = null; // næste hass-opdatering prøver igen
+      console.error("indkob-madplan-card: kunne ikke hente im-common.js", err);
+      throw err;
+    },
+  ));
 
 // Kortets modul indlæses ved hver opstart af HA's frontend – herfra genoptages indkøbslisten.
-C.resumeIfShopping();
+loadCommon().then((m) => m.resumeIfShopping(), () => {});
 
 // Familien spiser 17–18; herefter viser den kompakte række morgendagens ret (= const.FROST_SKIFT_TIME).
 const AFTEN_SLUT_TIME = 18;
@@ -45,12 +61,22 @@ class IndkobMadplanCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this.toggleAttribute("dark", !!hass.themes?.darkMode);
+    if (!C) {
+      // Tegnes, når im-common er hentet (normalt få ms efter registreringen).
+      loadCommon().then(() => this._start(), () => {});
+      return;
+    }
+    this._start();
+  }
+
+  _start() {
+    if (!this._hass) return;
     if (!this._built) this._build();
     if (!this._unlisten) this._listen();
   }
 
   connectedCallback() {
-    if (this._hass && !this._unlisten) this._listen();
+    if (C && this._hass && !this._unlisten) this._listen();
   }
   disconnectedCallback() {
     this._unlisten?.();

@@ -55,7 +55,10 @@ type IndkobConfigEntry = ConfigEntry[IndkobMadplanManager]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     frontend_dir = Path(__file__).parent / "frontend"
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(URL_BASE, str(frontend_dir), cache_headers=False)]
+        # Alle filer hentes med ?v=VERSION, så de må caches (31 dage). Uden cache spurgte
+        # browseren serveren for hver fil ved hver genindlæsning, og kortet blev senere klar.
+        # VERSION og alle ?v= skal derfor op ved hver udgivelse.
+        [StaticPathConfig(URL_BASE, str(frontend_dir), cache_headers=True)]
     )
     add_extra_js_url(hass, f"{URL_BASE}/{CARD_FILE}?v={VERSION}")
     for cmd in (
