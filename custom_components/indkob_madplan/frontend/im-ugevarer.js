@@ -6,7 +6,7 @@
  * her; de huskes, så retten fremover fylder listen selv. "Tilføj N varer" lægger dem på
  * indkøbslisten med retmærke (retnavnet står med småt under varen).
  */
-import { esc } from "./im-common.js?v=0.16.1";
+import { esc } from "./im-common.js?v=0.16.2";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -54,10 +54,12 @@ class UgeVarer extends HTMLElement {
     }
   }
 
-  _luk() {
+  /* 0.16.2: `skjul` = brugeren trykkede "Ikke nu" – kun da skjules kortet "Varer til ugens retter".
+     Luk, Escape, tryk ved siden af og "Tilføj" lader kortet blive (man har måske bare kigget). */
+  _luk(skjul = false) {
     const ark = this.shadowRoot.querySelector(".ark");
     if (ark) ark.classList.remove("inde");
-    setTimeout(() => this.dispatchEvent(new CustomEvent("luk", { bubbles: true, composed: true })), 220);
+    setTimeout(() => this.dispatchEvent(new CustomEvent("luk", { bubbles: true, composed: true, detail: { skjul } })), 220);
   }
 
   /* ------------------------------------------------------------ data */
@@ -137,8 +139,9 @@ class UgeVarer extends HTMLElement {
         <p>Varerne lægges på listen som engangsvarer med retten skrevet med småt under – så kan I se i butikken, hvad den skal bruges til.</p>
       </details>`;
     const n = this._antal();
+    const m = d.mangler?.length || 0;
     bund.innerHTML = `
-      <button class="sek" data-a="luk">${n ? "Ikke nu" : "Luk"}</button>
+      ${n || m ? `<button class="sek" data-a="ikke-nu">Ikke nu</button>` : `<button class="sek" data-a="luk">Luk</button>`}
       <button class="prim" data-a="tilfoej" ${n && !this._busy ? "" : "disabled"}>${n ? `Tilføj ${n} ${n === 1 ? "vare" : "varer"}` : "Intet at tilføje"}</button>`;
   }
 
@@ -215,6 +218,7 @@ class UgeVarer extends HTMLElement {
     if (!b) return;
     const a = b.dataset.a;
     if (a === "luk") return this._luk();
+    if (a === "ikke-nu") return this._luk(true);
     if (a === "igen") return this._hent({});
     if (!this.data) return;
     if (a === "periode") {

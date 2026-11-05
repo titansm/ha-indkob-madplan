@@ -2,11 +2,11 @@
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
   UGEDAGE, nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.16.1";
-import "./im-planner.js?v=0.16.1";
-import "./im-retter.js?v=0.16.1";
-import "./im-ugevarer.js?v=0.16.1";
-import "./im-koleskab.js?v=0.16.1";
+} from "./im-common.js?v=0.16.2";
+import "./im-planner.js?v=0.16.2";
+import "./im-retter.js?v=0.16.2";
+import "./im-ugevarer.js?v=0.16.2";
+import "./im-koleskab.js?v=0.16.2";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -1647,10 +1647,12 @@ class IndkobMadplanPanel extends HTMLElement {
     if (this._ugevarer) return;
     const el = document.createElement("im-ugevarer");
     this._ugevarer = el;
-    el.addEventListener("luk", () => {
+    el.addEventListener("luk", (e) => {
       el.remove();
       this._ugevarer = null;
-      this._skjulUgevarerCta(); // set – kommer igen, når madplanen ændres
+      // 0.16.2: kun "Ikke nu" skjuler kortet (kommer igen, når madplanen ændres) – ellers bliver det stående
+      if (e.detail?.skjul) this._skjulUgevarerCta();
+      else this._renderUgevarerCta();
     });
     this.shadowRoot.appendChild(el);
     el.open(this._store, this._state, opts);
