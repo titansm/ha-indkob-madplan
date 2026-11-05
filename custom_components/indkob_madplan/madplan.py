@@ -305,6 +305,58 @@ def overlap(text: str, today: date, uge_start: int | None = None) -> list[dict]:
     return ud
 
 
+def uforstaaet(text: str, today: date, uge_start: int | None = None, max_antal: int = 12) -> list[dict]:
+    """Linjer, parseren ikke bruger, eller som lander en uge forkert (0.17.0, kun til visning).
+
+    - tekst før første "Uge NN"
+    - linjer i en uge, der ikke starter med en ugedag (fx stavefejl "Fredg: …")
+    - med fast startdag: en ugedag uden for rækkefølge, så den (og resten af blokken) havner i ugen efter
+    Kun uger med datoer fra en uge siden og frem tages med (gamle uger giver ingen advarsel).
+    """
+    graense = today - timedelta(days=7)
+    ud: list[dict] = []
+    raa = (text or "").splitlines()
+    linjer = scan_linjer(text, today, uge_start)
+    pr_blok: dict[int, list[Linje]] = {}
+    for ln in linjer:
+        pr_blok.setdefault(ln.blok, []).append(ln)
+    dag_idx = {ln.idx for ln in linjer}
+    blok = -1
+    week: int | None = None
+    blok_aktuel = False
+    for i, r in enumerate(raa):
+        line = _clean_line(r)
+        if not line:
+            continue
+        m = _WEEK_RE.match(line)
+        if m:
+            blok += 1
+            week = int(m.group(1))
+            b = pr_blok.get(blok, [])
+            blok_aktuel = not b or max(ln.dag.dato for ln in b) >= graense
+            continue
+        if i in dag_idx:
+            continue
+        if week is None:
+            ud.append({"linje": i, "tekst": line, "grund": "står før første \"Uge NN\" og bruges ikke"})
+        elif blok_aktuel:
+            grund = ("ugedagen kunne ikke findes i Uge %d" % week) if _DAY_RE.match(line) else \
+                "starter ikke med en ugedag og bruges ikke"
+            ud.append({"linje": i, "tekst": line, "grund": grund})
+    if uge_start is not None:
+        for b in pr_blok.values():
+            foerste = b[0].dag.dato
+            start = foerste - timedelta(days=(foerste.weekday() - uge_start) % 7)
+            for ln in b:
+                if ln.dag.dato >= start + timedelta(days=7) and ln.dag.dato >= today:
+                    ud.append({"linje": ln.idx, "tekst": _clean_line(raa[ln.idx]), "dato": ln.dag.dato.isoformat(),
+                               "grund": f"lander i ugen efter {ln.overskrift} ({UGEDAGE[ln.dag.dato.weekday()].lower()} "
+                                        f"{ln.dag.dato.day}/{ln.dag.dato.month}) – står ugedagen i forkert rækkefølge?"})
+                    break  # resten af blokken følger med – én advarsel pr. uge
+    ud.sort(key=lambda x: x["linje"])
+    return ud[:max_antal]
+
+
 def ny_uge_info(text: str, start: date, today: date, uge_start: int | None = None) -> dict:
     """Hvor "Ny uge" skal skrive fra `start` (0.17.0).
 

@@ -278,6 +278,11 @@ class IndkobMadplanPanel extends HTMLElement {
                 <button class="link" data-act="mp-kopi-gendan">Gendan</button>
                 <button class="link" data-act="mp-kopi-luk" aria-label="Slet kopien">Slet kopien</button>
               </div>
+              <details class="overlap" id="mp-ufo" hidden>
+                <summary id="mp-ufo-sum"></summary>
+                <ul id="mp-ufo-liste"></ul>
+                <p class="fod">Ret linjen, så den starter med en ugedag under den rigtige "Uge NN".</p>
+              </details>
               <details class="overlap" id="mp-overlap" hidden>
                 <summary id="mp-overlap-sum"></summary>
                 <ul id="mp-overlap-liste"></ul>
@@ -1559,6 +1564,15 @@ class IndkobMadplanPanel extends HTMLElement {
   /* 0.13.0: dage, der står forskelligt i to uger (kun den ene bruges) – kun en advarsel */
   _renderOverlap(mp) {
     const r = this.shadowRoot;
+    // 0.17.0: linjer i madplanen, der ikke blev forstået
+    const uf = mp.uforstaaet || [];
+    r.getElementById("mp-ufo").hidden = !uf.length;
+    if (uf.length) {
+      r.getElementById("mp-ufo-sum").textContent =
+        `⚠ ${uf.length} ${uf.length === 1 ? "linje" : "linjer"} i madplanen blev ikke forstået`;
+      r.getElementById("mp-ufo-liste").innerHTML = uf.map((u) => `<li>«${esc(u.tekst)}» – ${esc(u.grund)}
+        <button class="link" data-act="mp-linje" data-linje="${u.linje}">Vis linjen</button></li>`).join("");
+    }
     const ov = mp.overlap || [];
     const el = r.getElementById("mp-overlap");
     el.hidden = !ov.length;

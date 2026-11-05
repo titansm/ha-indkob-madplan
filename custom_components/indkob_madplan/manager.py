@@ -48,7 +48,7 @@ from .const import (
 )
 from .madplan import (
     _FRA_FRYSER_RE, DEFAULT_KOED_ORD, DEFAULT_REST_ORD, INTET_FRA_FRYSER, UGEDAGE, Dag, dish_key, flet3, overlap,
-    ny_uge_info, parse_madplan, retter, scan_linjer, uge_nr, vindere,
+    ny_uge_info, parse_madplan, retter, scan_linjer, uforstaaet, uge_nr, vindere,
 )
 from .notes import TYPE_ITEM, ShoppingNote, TextNote, new_id
 from . import kategorier as kat
@@ -1076,6 +1076,11 @@ class IndkobMadplanManager:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Fejl ved tjek af overlappende uger")
             self._overlap = []
+        try:  # 0.17.0: linjer, der ikke blev forstået
+            self._uforstaaet = uforstaaet(self.madplan_note.text, dt_util.now().date(), self.uge_start)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Fejl ved tjek af madplanens linjer")
+            self._uforstaaet = []
 
     # ------------------------------------------------------------ madplanens versioner (0.13.0)
     def _revisioner(self) -> list[dict]:
@@ -2610,6 +2615,7 @@ class IndkobMadplanManager:
                 "frost_dag": "i morgen" if self.frost_tomorrow else "i dag",
                 # 0.13.0: dage der står forskelligt i to uger (kun advarsel) + hvor "Ny uge" skal starte
                 "overlap": getattr(self, "_overlap", []),
+                "uforstaaet": getattr(self, "_uforstaaet", []),  # 0.17.0
                 "ny_uge": self.ny_uge(),
             },
             "stats": {k: v for k, v in self.stats.items() if k != "varer"},
