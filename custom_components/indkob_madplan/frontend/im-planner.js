@@ -25,8 +25,8 @@
  * køleskabet før forrige "Gem i madplanen" (koleskab/ny_planlaegning); er køleskabet tomt, står der
  * en påmindelse om at skrive resterne.
  */
-import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.15.1";
-import "./im-koleskab.js?v=0.15.1";
+import { esc, lsGet, lsSet, UGEDAGE } from "./im-common.js?v=0.16.0";
+import "./im-koleskab.js?v=0.16.0";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];

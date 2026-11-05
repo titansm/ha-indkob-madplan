@@ -1,12 +1,12 @@
 /* Indkøb & Madplan – sidepanel i Home Assistant (noter à la iOS Noter). */
 import {
   BASE_CSS, Checklist, PIN, aftenHTML, autofillHTML, clearResume, esc, forslagHTML, getStore, lsGet, lsSet, markResume,
-  nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
-} from "./im-common.js?v=0.15.1";
-import "./im-planner.js?v=0.15.1";
-import "./im-retter.js?v=0.15.1";
-import "./im-ugevarer.js?v=0.15.1";
-import "./im-koleskab.js?v=0.15.1";
+  UGEDAGE, nyUgeSkabelon, prettyHeader, relTime, scrollerOf, sidenTekst, statsHTML,
+} from "./im-common.js?v=0.16.0";
+import "./im-planner.js?v=0.16.0";
+import "./im-retter.js?v=0.16.0";
+import "./im-ugevarer.js?v=0.16.0";
+import "./im-koleskab.js?v=0.16.0";
 
 const NOTES = [
   { id: "indkob", title: "Indkøbsliste" },
@@ -342,6 +342,15 @@ class IndkobMadplanPanel extends HTMLElement {
                   <input type="radio" name="frost" value="i_morgen" data-set="frost_day" /></label>
               </div>
               <p class="fod">Styrer "Tag kød op af fryseren" og ❄-linjen. Notifikationen kl. 10 sendes af en automation i Home Assistant.</p>
+
+              <h3 class="gruppe">Madplanens uge</h3>
+              <div class="kort">
+                <label class="felt">
+                  <span class="fl">Ugen starter<small>Ny uge og planlæggeren begynder på denne dag</small></span>
+                  <span class="fv"><select id="s-ugestart" data-set="uge_start"></select></span>
+                </label>
+              </div>
+              <p class="fod">"Ny uge" og ugeplanlæggeren starter altid på den valgte ugedag, og planlæggeren foreslår en hel uge. Varer til ugen regner også indkøbsugen fra den dag. Med <i>Ingen fast dag</i> fortsætter de dagen efter den sidste planlagte dag.</p>
 
               <h3 class="gruppe">Ugeplanlæggeren</h3>
               <div class="kort">
@@ -1458,6 +1467,12 @@ class IndkobMadplanPanel extends HTMLElement {
     r.getElementById("s-std").textContent = i.standard_koed_ord.join(", ") +
       `. Retter med "${i.rest_ord.join('", "')}" kræver aldrig optøning; "fra fryser" gør altid.`;
     r.getElementById("s-version").textContent = `Indkøb & Madplan ${i.version}`;
+    const us = r.getElementById("s-ugestart");
+    if (focus !== us) {
+      const cur = String(i.uge_start ?? "4");
+      us.innerHTML = [...UGEDAGE.map((n, idx) => [String(idx), n]), ["ingen", "Ingen fast dag"]]
+        .map(([v, n]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${n}</option>`).join("");
+    }
     const kal = r.getElementById("s-kalender");
     if (focus !== kal) {
       kal.innerHTML = `<option value="">Ingen</option>` + (i.kalendere || [])
@@ -1678,9 +1693,11 @@ class IndkobMadplanPanel extends HTMLElement {
     const d = this._uv;
     const n = d ? d.varer.filter((v) => v.valgt).length : 0;
     const m = d ? d.mangler.length : 0;
-    // Kun når næste uge er planlagt – eller om fredagen (indkøbsdagen). Midt i ugen er indkøbet
-    // allerede gjort; smutture klares med knappen Varer i madplanen.
-    const relevant = !!d && (d.start === d.perioder?.[1]?.start || new Date().getDay() === 5);
+    // Kun når næste uge er planlagt – eller på indkøbsdagen (ugens første dag, standard fredag). Midt i
+    // ugen er indkøbet allerede gjort; smutture klares med knappen Varer i madplanen.
+    const us = this._state?.indstillinger?.uge_start;
+    const indkobsdag = us == null || us === "ingen" ? 5 : (parseInt(us, 10) + 1) % 7; // JS: søndag = 0
+    const relevant = !!d && (d.start === d.perioder?.[1]?.start || new Date().getDay() === indkobsdag);
     const vis = relevant && (n > 0 || m > 0) && lsGet("varer_cta_skjult", "") !== this._uvSkjulNøgle();
     const p = d?.perioder?.find((x) => x.start === d.start);
     const sub = vis ? [

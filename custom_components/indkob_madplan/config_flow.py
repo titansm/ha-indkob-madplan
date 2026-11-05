@@ -17,11 +17,14 @@ from .const import (
     CONF_PLAN_KALENDER,
     CONF_TRIP_DELAY,
     CONF_TRIP_THRESHOLD,
+    CONF_UGE_START,
     DEFAULT_TRIP_DELAY,
     DEFAULT_TRIP_THRESHOLD,
+    DEFAULT_UGE_START,
     DOMAIN,
     FROST_TODAY,
     FROST_TOMORROW,
+    UGE_START_INGEN,
 )
 
 
@@ -35,6 +38,15 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                     options=[FROST_TODAY, FROST_TOMORROW],
                     translation_key="frost_day",
                     mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Required(
+                CONF_UGE_START, default=str(defaults.get(CONF_UGE_START, DEFAULT_UGE_START))
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[str(i) for i in range(7)] + [UGE_START_INGEN],
+                    translation_key="uge_start",
+                    mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
             vol.Optional(

@@ -18,7 +18,7 @@
  * 0.15.1: tomt køleskab i planlæggeren vises som påmindelse ("Husk resterne i køleskabet"), og
  * `nulstillet(res)` viser, hvilke rester fra forrige madplan der blev taget ud – med Fortryd.
  */
-import { esc } from "./im-common.js?v=0.15.1";
+import { esc } from "./im-common.js?v=0.16.0";
 
 const KORT = { Mandag: "man.", Tirsdag: "tirs.", Onsdag: "ons.", Torsdag: "tors.", Fredag: "fre.", "Lørdag": "lør.", "Søndag": "søn." };
 const lf = (s) => (s && !/^[A-ZÆØÅ]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");

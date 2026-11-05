@@ -1,7 +1,7 @@
 """Konstanter for Indkøb & Madplan."""
 
 DOMAIN = "indkob_madplan"
-VERSION = "0.15.1"
+VERSION = "0.16.0"
 
 CONF_FROST_DAY = "frost_day"
 CONF_EXTRA_KOED = "extra_koed_ord"
@@ -11,6 +11,10 @@ CONF_PLAN_KALENDER = "madplan_kalender"  # kalender til ugeplanlæggeren
 CONF_TRIP_DELAY = "handlet_timer"  # timer efter sidste flueben før fluebenene fjernes
 DEFAULT_TRIP_THRESHOLD = 50
 DEFAULT_TRIP_DELAY = 3.0
+# Madplanens uge starter på denne ugedag ("0" = mandag … "6" = søndag, "ingen" = ingen fast dag)
+CONF_UGE_START = "uge_start"
+UGE_START_INGEN = "ingen"
+DEFAULT_UGE_START = "4"  # fredag
 
 FROST_TODAY = "i_dag"
 FROST_TOMORROW = "i_morgen"

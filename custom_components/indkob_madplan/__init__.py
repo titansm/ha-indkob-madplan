@@ -26,6 +26,7 @@ from .const import (
     CONF_PLAN_KALENDER,
     CONF_TRIP_DELAY,
     CONF_TRIP_THRESHOLD,
+    CONF_UGE_START,
     DOMAIN,
     FROST_TODAY,
     FROST_TOMORROW,
@@ -359,6 +360,7 @@ def ws_indkob__tilfoej(m: IndkobMadplanManager, msg: dict, user: str | None) -> 
     vol.Optional(CONF_IGNORE_KOED): vol.All(str, vol.Length(max=1000)),
     vol.Optional(CONF_TRIP_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=10, max=100)),
     vol.Optional(CONF_TRIP_DELAY): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=24)),
+    vol.Optional(CONF_UGE_START): vol.In(["0", "1", "2", "3", "4", "5", "6", "ingen"]),
 })
 def ws_settings__set(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.set_settings({k: v for k, v in msg.items() if k not in ("id", "type")}, user)

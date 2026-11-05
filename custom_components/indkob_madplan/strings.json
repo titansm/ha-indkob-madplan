@@ -8,7 +8,8 @@
           "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
           "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)",
           "handlet_taerskel": "Handlet ind, når denne andel er krydset af",
-          "handlet_timer": "Fjern fluebenene efter (timer efter sidste flueben)"
+          "handlet_timer": "Fjern fluebenene efter (timer efter sidste flueben)",
+          "uge_start": "Madplanens uge starter"
         },
         "data_description": {
           "extra_koed_ord": "Fx: nasi goreng, tacos",
@@ -32,7 +33,8 @@
           "extra_koed_ord": "Ekstra kød-ord (kommasepareret)",
           "ignorer_ord": "Ord der IKKE udløser optøning (kommasepareret)",
           "handlet_taerskel": "Handlet ind, når denne andel er krydset af",
-          "handlet_timer": "Fjern fluebenene efter (timer efter sidste flueben)"
+          "handlet_timer": "Fjern fluebenene efter (timer efter sidste flueben)",
+          "uge_start": "Madplanens uge starter"
         },
         "data_description": {
           "extra_koed_ord": "Fx: nasi goreng, tacos",
@@ -48,6 +50,18 @@
       "options": {
         "i_dag": "I dag (samme dag som retten)",
         "i_morgen": "I morgen (aftenen før)"
+      }
+    },
+    "uge_start": {
+      "options": {
+        "0": "Mandag",
+        "1": "Tirsdag",
+        "2": "Onsdag",
+        "3": "Torsdag",
+        "4": "Fredag",
+        "5": "Lørdag",
+        "6": "Søndag",
+        "ingen": "Ingen fast dag (dagen efter sidste planlagte dag)"
       }
     }
   },

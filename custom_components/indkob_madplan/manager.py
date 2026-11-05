@@ -27,8 +27,10 @@ from .const import (
     CONF_PLAN_KALENDER,
     CONF_TRIP_DELAY,
     CONF_TRIP_THRESHOLD,
+    CONF_UGE_START,
     DEFAULT_TRIP_DELAY,
     DEFAULT_TRIP_THRESHOLD,
+    DEFAULT_UGE_START,
     EVENT_BUTIK_AFSLUTTET,
     EVENT_HANDLET_IND,
     FROST_TODAY,
@@ -41,6 +43,7 @@ from .const import (
     STORAGE_KEY,
     STORAGE_KEY_OPSKRIFTER,
     STORAGE_VERSION,
+    UGE_START_INGEN,
     VERSION,
 )
 from .madplan import (
@@ -160,6 +163,22 @@ class IndkobMadplanManager:
         words = DEFAULT_KOED_ORD + _split_words(self.opts.get(CONF_EXTRA_KOED))
         return [w for w in words if w.strip().lower() not in ignore]
 
+    @property
+    def uge_start(self) -> int | None:
+        """Ugedagen madplanens uge starter på (0 = mandag … 6 = søndag); None = ingen fast dag."""
+        v = str(self.opts.get(CONF_UGE_START, DEFAULT_UGE_START))
+        if v == UGE_START_INGEN:
+            return None
+        try:
+            return int(v) % 7
+        except ValueError:
+            return int(DEFAULT_UGE_START)
+
+    def _til_ugestart(self, d: date) -> date:
+        """Første dag fra og med `d`, der er ugens startdag (uændret uden fast startdag)."""
+        ws = self.uge_start
+        return d if ws is None else d + timedelta(days=(ws - d.weekday()) % 7)
+
     def settings(self) -> dict[str, Any]:
         """Indstillinger til panelets Indstillinger-side."""
         o = self.opts
@@ -170,6 +189,7 @@ class IndkobMadplanManager:
             CONF_TRIP_THRESHOLD: round(float(o.get(CONF_TRIP_THRESHOLD, DEFAULT_TRIP_THRESHOLD))),
             CONF_TRIP_DELAY: float(o.get(CONF_TRIP_DELAY, DEFAULT_TRIP_DELAY)),
             CONF_PLAN_KALENDER: self.plan_kalender or "",
+            CONF_UGE_START: str(self.opts.get(CONF_UGE_START, DEFAULT_UGE_START)),
             "kalendere": self._kalendere(),
             "skjulte_retter": list(self.planner_data.get("skjulte", [])),
             "standard_koed_ord": DEFAULT_KOED_ORD,
@@ -180,7 +200,8 @@ class IndkobMadplanManager:
     @callback
     def set_settings(self, changes: dict[str, Any], user: str | None = None) -> dict[str, Any]:
         """Gem ændrede indstillinger i integrationens options (uden genindlæsning)."""
-        keys = (CONF_FROST_DAY, CONF_EXTRA_KOED, CONF_IGNORE_KOED, CONF_TRIP_THRESHOLD, CONF_TRIP_DELAY, CONF_PLAN_KALENDER)
+        keys = (CONF_FROST_DAY, CONF_EXTRA_KOED, CONF_IGNORE_KOED, CONF_TRIP_THRESHOLD, CONF_TRIP_DELAY, CONF_PLAN_KALENDER,
+                CONF_UGE_START)
         before = self.settings()
         new = {k: self.opts.get(k) for k in keys if self.opts.get(k) is not None}
         new.update({k: v for k, v in changes.items() if k in keys})
@@ -194,6 +215,8 @@ class IndkobMadplanManager:
                 elif k == CONF_PLAN_KALENDER:
                     st = self.hass.states.get(v) if v else None
                     vis = (st.name if st else v) or "ingen"
+                elif k == CONF_UGE_START:
+                    vis = "ingen fast dag" if v == UGE_START_INGEN else UGEDAGE[int(v)].lower()
                 self._log(user, "indstillinger", f'satte "{SETTING_LABELS[k]}" til {vis or "(tom)"}', key=f"set:{k}")
         self.hass.config_entries.async_update_entry(self.entry, options=new)
         return self.settings()
@@ -1083,10 +1106,12 @@ class IndkobMadplanManager:
 
     def ny_uge(self) -> dict:
         """0.13.0 "Ny uge": dagen efter den sidste dag med tekst (ikke tomme skabelon-dage), aldrig før i dag.
+        0.16.0: med fast startdag (standard fredag) rykkes den frem til ugens første dag.
         Står der allerede (tomme) linjer for den dag, peger `linje` på dem i stedet for en ny blok."""
         today = dt_util.now().date()
         udfyldt = [d for d, dag in self.madplan.items() if (dag.raw or "").strip()]
         start = max(today, max(udfyldt) + timedelta(days=1)) if udfyldt else today
+        start = self._til_ugestart(start)
         linje = None
         try:
             v = vindere(scan_linjer(self.madplan_note.text, today)).get(start)
@@ -1488,14 +1513,22 @@ class IndkobMadplanManager:
                 "fandtes": fandtes}
 
     # ------------------------------------------------------------ varer til ugen (0.12)
+    @property
+    def _indkob_ugestart(self) -> int:
+        """Indkøbsugens første dag til Varer til ugen: ugens startdag, ellers fredag."""
+        ws = self.uge_start
+        return 4 if ws is None else ws
+
     def _perioder(self, today: date) -> list[dict]:
-        """Resten af indkøbsugen (fre → tor) og næste uge. Fredag er "denne uge" hele ugen."""
+        """Resten af indkøbsugen (fre → tor) og næste uge. Fredag er "denne uge" hele ugen.
+        0.16.0: indkøbsugen følger indstillingen "Ugen starter" (standard fredag; uden fast dag: fredag)."""
         wd = today.weekday()
-        naeste_fre = today + timedelta(days=(4 - wd) % 7 or 7)
+        ws = self._indkob_ugestart
+        naeste_fre = today + timedelta(days=(ws - wd) % 7 or 7)
         nu_dage = (naeste_fre - today).days
         return [
             {"id": "nu", "start": today.isoformat(), "dage": nu_dage,
-             "titel": "Denne uge" if wd == 4 else "Resten af ugen"},
+             "titel": "Denne uge" if wd == ws else "Resten af ugen"},
             {"id": "naeste", "start": naeste_fre.isoformat(), "dage": 7, "titel": "Næste uge"},
         ]
 
@@ -1549,12 +1582,12 @@ class IndkobMadplanManager:
             n_start = date.fromisoformat(naeste["start"])
             planlagt = any(self.madplan.get(n_start + timedelta(days=i)) and self.madplan[n_start + timedelta(days=i)].ret
                            for i in range(7))
-            valgt = nu if (today.weekday() == 4 or not planlagt) else naeste
+            valgt = nu if (today.weekday() == self._indkob_ugestart or not planlagt) else naeste
             start, dage = date.fromisoformat(valgt["start"]), valgt["dage"]
         dage = max(1, min(dage or 7, 14))
         slut = start + timedelta(days=dage - 1)
         # Købt siden fredag tæller for resten af denne uge; for næste uge kun det, der er købt i dag
-        sidste_fre = today - timedelta(days=(today.weekday() - 4) % 7)
+        sidste_fre = today - timedelta(days=(today.weekday() - self._indkob_ugestart) % 7)
         koebt_siden = sidste_fre if start < date.fromisoformat(perioder[1]["start"]) else today
         try:
             aftener = {a.dato: a for a in pl.laes_historik(self.madplan)}
@@ -1772,11 +1805,13 @@ class IndkobMadplanManager:
     def _plan_start(self) -> date:
         today = dt_util.now().date()
         planlagt = [d for d, dag in self.madplan.items() if dag.ret]
+        start = today
         if planlagt:
             nxt = max(planlagt) + timedelta(days=1)
             if nxt > today:
-                return nxt
-        return today
+                start = nxt
+        # 0.16.0: med fast startdag (standard fredag) starter planlægningen altid på ugens første dag
+        return self._til_ugestart(start)
 
     async def _kalender_events(self, start: date, slut: date) -> list[dict]:
         entity = self.plan_kalender
@@ -1819,7 +1854,8 @@ class IndkobMadplanManager:
         alle = self._opskrift_retter()
         kendte = {navn: o.egenskaber() for navn, o in alle.items()}
         model = pl.byg_model(self.madplan, today, foer=start, kendte=kendte)
-        dage = max(3, min(14, dage or model.blok_laengde))
+        # 0.16.0: med fast startdag planlægges en hel uge (fx fredag–torsdag)
+        dage = max(3, min(14, dage or (7 if self.uge_start is not None else model.blok_laengde)))
         slut = start + timedelta(days=dage - 1)
         events = await self._kalender_events(start, slut)
         tags = tags or {}
@@ -2539,6 +2575,7 @@ SETTING_LABELS = {
     CONF_FROST_DAY: "Optøning gælder",
     CONF_EXTRA_KOED: "Ekstra kød-ord",
     CONF_IGNORE_KOED: "Ord uden optøning",
+    CONF_UGE_START: "Ugen starter",
 }
 
 
