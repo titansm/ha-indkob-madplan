@@ -143,8 +143,9 @@ class ImStore {
   remove(ids) {
     return this.send("indkob/delete", { line_ids: ids });
   }
-  clearChecked() {
-    return this.send("indkob/clear_checked");
+  clearChecked(havdeVi = false) {
+    // 0.17.0: havdeVi = varerne var der i forvejen (ingen indkøbstur, intet køb i statistikken)
+    return this.send("indkob/clear_checked", havdeVi ? { havde_vi: true } : {});
   }
   uncheckAll() {
     return this.send("indkob/uncheck_all");

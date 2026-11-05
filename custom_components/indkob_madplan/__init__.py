@@ -251,9 +251,10 @@ def ws_indkob__fast(m: IndkobMadplanManager, msg: dict, user: str | None) -> dic
     return {"fast": m.set_fast(msg["line_id"], msg["fast"], user)}
 
 
-@_ws({})
+@_ws({vol.Optional("havde_vi", default=False): bool})
 def ws_indkob__clear_checked(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
-    return {"fjernet": m.finish_trip(user, delete=True)}
+    # 0.17.0: havde_vi = varerne var der i forvejen – slettes uden indkøbstur og uden køb i statistikken
+    return {"fjernet": m.finish_trip(user, delete=True, havde_vi=msg["havde_vi"])}
 
 
 @_ws({

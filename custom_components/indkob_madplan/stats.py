@@ -218,6 +218,10 @@ class History:
         self.names[key] = _clean_display(summary) or display_name(key)
         return {"t": now.isoformat(timespec="seconds"), "k": key, "type": typ}
 
+    def undo_buy(self, key: str, now: datetime) -> bool:
+        """0.17.0: fortryd det seneste køb af varen (inden for 12 t) – fx "Havde vi i forvejen"."""
+        return self._undo_buy(key, now)
+
     def _undo_buy(self, key: str, now: datetime) -> bool:
         for i in range(len(self.events) - 1, -1, -1):
             ev = self.events[i]

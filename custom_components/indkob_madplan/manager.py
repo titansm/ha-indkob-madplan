@@ -515,6 +515,7 @@ class IndkobMadplanManager:
         total, checked = self._count()
         now = dt_util.now().isoformat(timespec="seconds")
         more = checked > self._checked_count
+        faerre = checked < self._checked_count
         self._checked_count = checked
         if self._stops():
             # Mindst én butik er afsluttet med knappen: turen annulleres ikke.
@@ -547,7 +548,8 @@ class IndkobMadplanManager:
                 _LOGGER.debug("Indkøbstur registreret (%s/%s afkrydset)", checked, total)
             elif more:
                 self.trip["sidste_flueben"] = now
-        elif self.trip is not None:
+        elif self.trip is not None and (faerre or not checked):
+            # 0.17.0: kun fjernede flueben annullerer en registreret tur – nye varer på listen gør ikke
             _LOGGER.debug("Indkøbstur annulleret (%s/%s afkrydset)", checked, total)
             self.trip = None
 
@@ -564,7 +566,8 @@ class IndkobMadplanManager:
 
     @callback
     def finish_trip(self, user: str | None = None, *, auto: bool = False, delete: bool = False,
-                    butik: str | None = None, beloeb: float | None = None, fjern: list[str] | None = None) -> int:
+                    butik: str | None = None, beloeb: float | None = None, fjern: list[str] | None = None,
+                    havde_vi: bool = False) -> int:
         """Afslut indkøbet: log turen og fjern fluebenene (eller de afkrydsede varer).
 
         Købene er allerede registreret ved afkrydsning – her sættes kun en ny
@@ -574,6 +577,23 @@ class IndkobMadplanManager:
         (`butik`/`beloeb`) og fjerne ukøbte engangsvarer, der ikke skal med næste gang (`fjern`).
         """
         self.last_finished_trip = None
+        hjemme = 0
+        if havde_vi and delete:
+            # 0.17.0 ("Havde vi i forvejen"): afkrydsede varer, der ikke er købt i en butik, slettes uden
+            # indkøbstur, og købet tages ud af statistikken (afkrydset inden for 12 t)
+            bought = self.bought()
+            ud = [ln for ln in self.indkob.items() if ln["checked"] and ln["id"] not in bought]
+            if ud:
+                now_ = dt_util.now()
+                for ln in ud:
+                    if key := normalize(ln["text"]):
+                        self.history.undo_buy(key, now_)
+                self.indkob.delete([ln["id"] for ln in ud])
+                navne = [ln["text"] for ln in ud if ln["text"].strip()]
+                hjemme = len(navne)
+                if navne:
+                    self._log(user, "indkob", f"slettede {len(navne)} afkrydsede varer, I havde i forvejen (ikke købt): "
+                              + _names(navne, 6))
         butik = (butik or "").strip()
         if butik:
             bought = self.bought()
@@ -608,7 +628,7 @@ class IndkobMadplanManager:
                  "mangler_pris": _mangler_pris(trip)},
             )
         if delete:
-            n = self.indkob.clear_checked()
+            n = self.indkob.clear_checked() + hjemme
             if checked:
                 self._log(user, "indkob", f"slettede {len(checked)} afkrydsede varer: " + _names([ln['text'] for ln in checked], 6))
             self._reset_to_basis(user)  # faste varer kommer altid tilbage
@@ -877,7 +897,8 @@ class IndkobMadplanManager:
         n = self._note(note)
         if (kwargs.get("auto_place") or dedupe) and not restore and (ex := n.find_item(text)):
             # Varen står der allerede: fjern evt. fluebenet i stedet for at lave en dublet
-            if ex["checked"]:
+            # (0.17.0: ikke under et indkøb – så ligger den i kurven, og fluebenet bliver)
+            if ex["checked"] and not self._i_kurven(ex):
                 self.update_line(ex["id"], user, checked=False, note=note)
             return ex
         if n is self.basis:
@@ -890,6 +911,10 @@ class IndkobMadplanManager:
             self._log(user, note or NOTE_INDKOB, f'{"gendannede" if restore else "tilføjede"} "{text.strip()}"')
         self.indkob_changed(user, note)
         return line
+
+    def _i_kurven(self, ln: dict) -> bool:
+        """0.17.0: varen er krydset af under et indkøb (registreret tur) – den ligger i kurven."""
+        return bool(ln.get("checked")) and self.trip is not None
 
     def known_names(self) -> list[str]:
         """Varenavne til autofuldførelse: alt der står på listen nu + alt der er købt før.
@@ -910,7 +935,7 @@ class IndkobMadplanManager:
             if not t.strip():
                 continue
             if ex := self._existing(t):
-                if ex["checked"]:
+                if ex["checked"] and not self._i_kurven(ex):
                     self.indkob.update(ex["id"], checked=False)
                     self._log(user, "indkob", f'satte "{ex["text"].strip()}" på listen igen')
                 lines.append(ex)
@@ -1512,7 +1537,7 @@ class IndkobMadplanManager:
         for v in varer:
             t = op.liste_tekst(v, gange)
             if ex := self._existing(t):
-                if ex["checked"]:
+                if ex["checked"] and not self._i_kurven(ex):
                     self.indkob.update(ex["id"], checked=False)
                 _tag_ret(ex, [rnavn])
                 fandtes.append(ex["text"])

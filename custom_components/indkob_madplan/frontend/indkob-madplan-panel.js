@@ -433,6 +433,7 @@ class IndkobMadplanPanel extends HTMLElement {
     r.querySelector("[data-act=ny-linje]").hidden = this._shop;
     const plusAdded = (res) => {
       if (!res) this._setStatus("Kunne ikke tilføje");
+      else if (res.fandtes && res.checked) this._toast(`"${res.text}" ligger allerede i kurven`, { ms: 3500 });
       else if (res.fandtes) this._toast(`"${res.text}" står allerede på listen`, { ms: 3500 });
       else this._setStatus("Tilføjet");
     };
@@ -1134,6 +1135,11 @@ class IndkobMadplanPanel extends HTMLElement {
   _added(res, note = "indkob") {
     const kat = res.kategori ? prettyHeader(res.kategori) : "";
     const cl = note === "basis" ? this._clb : this._cl;
+    if (res.fandtes && res.checked && note === "indkob") {
+      cl.flash(res.id);
+      this._toast(`"${res.text}" ligger allerede i kurven`, { ms: 4000 });
+      return;
+    }
     if (res.fandtes) {
       cl.flash(res.id);
       this._toast(`"${res.text}" står allerede på ${note === "basis" ? "basislisten" : "listen"}${kat ? " · " + kat : ""}`, { ms: 4000 });
@@ -1345,8 +1351,8 @@ class IndkobMadplanPanel extends HTMLElement {
     this.shadowRoot.getElementById("hjaelp-body").innerHTML = `
       <p><b>Basislisten.</b> Efter hvert indkøb nulstilles listen til basislisten (Noter → <button class="link" data-note="basis">Basisliste</button>): fluebenene fjernes, købte engangsvarer forsvinder, og faste varer, der mangler, kommer tilbage. Engangsvarer er mærket <i>Engangs</i> – tryk på mærket for at gøre varen fast; <i>Fast</i> i værktøjslinjen skifter for den markerede vare.</p>
       <p><b>Kryds af, når varen ryger i kurven.</b> Hvert flueben tæller som et køb i statistikken. Fjerner du et flueben igen inden for 12 timer, regnes det som fortrudt.</p>
-      <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Kommer listen under ${pct} % igen, annulleres turen.</p>
-      <p><b>Færdig med at handle</b> (nederst i Handl eller under ⋯): skriv butik og beløb – eller spring over – så sættes listen tilbage til basislisten med det samme. Engangsvarer, der ikke blev købt, bliver stående; tryk på dem i arket, hvis de ikke skal med næste gang. "Slet afkrydsede varer" fjerner de afkrydsede varer – faste varer kommer dog tilbage.</p>
+      <p><b>Handlet ind.</b> Når mindst ${pct} % af varerne er krydset af, registreres en indkøbstur. ${tim[0].toUpperCase() + tim.slice(1)} efter <i>sidste</i> flueben fjernes alle flueben automatisk, og turen gemmes under Statistik → Seneste indkøb. Fjerner I flueben, så listen kommer under ${pct} % igen, annulleres turen (nye varer på listen annullerer den ikke). Tilføjer nogen en vare, der allerede ligger i kurven, bliver fluebenet.</p>
+      <p><b>Færdig med at handle</b> (nederst i Handl eller under ⋯): skriv butik og beløb – eller spring over – så sættes listen tilbage til basislisten med det samme. Engangsvarer, der ikke blev købt, bliver stående; tryk på dem i arket, hvis de ikke skal med næste gang. "Slet afkrydsede varer" fjerner de afkrydsede varer – faste varer kommer dog tilbage. Den spørger, om varerne blev <i>købt</i> (gemmes som indkøbstur) eller om I <i>havde dem</i> i forvejen (ingen tur, og de tælles ikke som købt).</p>
       <p><b>Hvad blev indkøbet?</b> Mangler det seneste indkøb et beløb (fx når listen er nulstillet automatisk), står der et kort øverst på listen. Tryk på det og skriv beløbet, eller × hvis det ikke skal have en pris.</p>
       <p><b>I butikken:</b> tryk på 🛒 Handl. Så krydser ét tryk på varen af, tastaturet holder sig væk, og øverst kan I se hvor langt I er. Tryk på Rediger for at rette i listen igen.</p>
       <p><b>Butikkens rækkefølge:</b> under Handl står kategorierne i den rækkefølge, I plejer at gå rundt i butikken – den læres af, hvornår I krydser varerne af, hver gang I afslutter et indkøb i butikken. Tryk på 🏪 over listen for at vælge butik, sætte rækkefølgen selv med pilene eller vise listens egen rækkefølge. Selve listen (Rediger) ændres ikke.</p>
@@ -1918,7 +1924,19 @@ class IndkobMadplanPanel extends HTMLElement {
     } else if (act === "fjern-afkrydsede") {
       pop.hidden = true;
       const n = this._state.indkob.lines.filter((l) => l.type === "item" && l.checked).length;
-      if (n) await this._store.clearChecked();
+      // 0.17.0: købt i butikken (indkøbstur) – eller havde vi dem i forvejen (ingen tur, intet køb)?
+      if (n) {
+        const slet = (havdeVi) => this._store.clearChecked(havdeVi)
+          .then(() => this._setStatus(havdeVi ? "Slettet – ikke talt som købt" : "Slettet"))
+          .catch(() => this._setStatus("Kunne ikke slette de afkrydsede varer"));
+        this._toast(`Slet ${n} afkrydsede ${n === 1 ? "vare" : "varer"} – blev ${n === 1 ? "den" : "de"} købt?`, {
+          actions: [
+            { label: "Købt", action: () => slet(false) },
+            { label: "Havde vi", action: () => slet(true) },
+          ],
+          ms: 12000,
+        });
+      }
     } else if (act === "fjern-flueben" || act === "faerdig") {
       if (pop) pop.hidden = true;
       this._openArk("faerdig");
