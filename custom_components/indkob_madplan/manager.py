@@ -483,6 +483,7 @@ class IndkobMadplanManager:
         for ln in self.indkob.items():
             if ln["checked"]:
                 ln.pop("ret", None)  # købt til ugens retter – den faste vare starter forfra
+                ln.pop("mere", None)  # 0.17.1: "+" (køb mere til madlavning) gælder kun dette indkøb
         self.indkob.uncheck_all()
         tilbage = []
         holdt = []
@@ -1730,6 +1731,8 @@ class IndkobMadplanManager:
                 "navn": it["navn"], "tekst": tekst, "retter": it["retter"], "dage": it["dage"],
                 "kategori": kat.NAVN.get(noegle, ""), "orden": kat.ORDEN.get(noegle, 99),
                 "koed": koed, "paa_listen": bool(ex), "linje_id": ex["id"] if ex else None, "koebt": koebt,
+                # 0.17.1: står varen på listen (ikke i kurven), kan den få et "+" – der skal mere til madlavning
+                "mere": bool(ex and ex.get("mere")), "kan_mere": bool(ex and not ex["checked"] and not ex.get("mere")),
                 "valgt": not (ex or koed or koebt or i_kol == "nok"), "grund": grund, "koleskab": i_kol,
                 **({"erstatter": it["erstatter"]} if it["erstatter"] else {}),  # 0.13.0: ❄-kødet erstatter dette
             })
@@ -1751,27 +1754,60 @@ class IndkobMadplanManager:
 
         0.13.0: `madplan_version` = den version, arket "Varer til ugen" blev regnet ud fra. Er madplanen
         ændret siden, afvises tilføjelsen (ConflictError), så arket kan regnes ud igen.
+        0.17.1: `mere` på en vare, der står på listen, giver linjen et "+" (der skal mere, fx mælk til
+        madlavning oven i det faste). Teksten røres ikke; "+" forsvinder, når varen er købt.
+        `mere_foer` = linjernes tidligere retmærke, så "Fortryd" kan sætte dem tilbage.
         """
         if madplan_version is not None and madplan_version != self.madplan_note.version:
             raise ConflictError
-        nye, fandtes = [], []
+        nye, fandtes, mere, mere_foer = [], [], [], []
         for v in varer:
             tekst = (v.get("tekst") or "").strip()
             if not tekst:
                 continue
             retter_ = [r for r in (v.get("retter") or []) if r][:4]
             if ex := self._existing(tekst):
+                if v.get("mere") and not ex.get("mere") and not ex["checked"]:
+                    mere_foer.append({"id": ex["id"], "ret": list(ex.get("ret") or [])})
+                    ex["mere"] = True
+                    mere.append(ex["text"])
+                else:
+                    fandtes.append(ex["text"])
                 _tag_ret(ex, retter_)
-                fandtes.append(ex["text"])
                 continue
             ln = self.indkob.add(tekst, line_type=TYPE_ITEM, auto_place=True)
             _tag_ret(ln, retter_)
             nye.append(ln)
-        if nye or fandtes:
+        if nye or fandtes or mere:
             self._log(user, "indkob", f'lagde {len(nye)} {"vare" if len(nye) == 1 else "varer"} til ugens retter på listen'
+                      + (f", {len(mere)} fik + (skal bruges mere): " + _names(mere, 6) if mere else "")
                       + (f" ({len(fandtes)} stod der i forvejen)" if fandtes else ""))
             self.indkob_changed(user)
-        return {"tilfoejet": [ln["text"] for ln in nye], "ids": [ln["id"] for ln in nye], "fandtes": fandtes}
+        return {"tilfoejet": [ln["text"] for ln in nye], "ids": [ln["id"] for ln in nye], "fandtes": fandtes,
+                "mere": mere, "mere_foer": mere_foer}
+
+    @callback
+    def fortryd_mere(self, linjer: list[dict], user: str | None = None) -> int:
+        """0.17.1: Fortryd fra "Varer til ugen": fjern "+" og sæt retmærket tilbage, som det var."""
+        n = 0
+        for x in linjer:
+            try:
+                ln = self.indkob.get(x["id"])
+            except KeyError:
+                continue  # slettet imens
+            if not ln.get("mere"):
+                continue
+            ln.pop("mere", None)
+            ret = [r for r in x.get("ret") or [] if r]
+            if ret:
+                ln["ret"] = ret
+            else:
+                ln.pop("ret", None)
+            n += 1
+        if n:
+            self._log(user, "indkob", f'fjernede + fra {n} {"vare" if n == 1 else "varer"}')
+            self.indkob_changed(user)
+        return n
 
     @callback
     def slet_statistik_vare(self, navn: str, user: str | None = None) -> int:

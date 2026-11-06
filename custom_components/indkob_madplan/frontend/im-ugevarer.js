@@ -5,8 +5,10 @@
  * denne uge er fravalgt – ét tryk vælger dem til. Retter uden varer kan få dem skrevet ind
  * her; de huskes, så retten fremover fylder listen selv. "Tilføj N varer" lægger dem på
  * indkøbslisten med retmærke (retnavnet står med småt under varen).
+ * 0.17.1: vælges en vare, der allerede står på listen, kommer der ingen ny linje – den får et
+ * diskret "+" (der skal mere til madlavning), som forsvinder, når varen er købt.
  */
-import { esc } from "./im-common.js?v=0.17.0";
+import { esc } from "./im-common.js?v=0.17.1";
 
 const KORT = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MDR = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -78,13 +80,19 @@ class UgeVarer extends HTMLElement {
     this._render();
   }
 
+  // 0.17.1: en vare på listen kan vælges til ("+" = der skal mere), medmindre den ligger i kurven
+  // eller allerede har "+". Den er altid fravalgt fra start og tæller ikke med i "Vælg alle".
+  _laast(v) {
+    return v.paa_listen && !v.kan_mere;
+  }
+
   _valgt(v) {
-    if (v.paa_listen) return false;
+    if (this._laast(v)) return !!v.mere;
     return this._valg.has(v.tekst) ? this._valg.get(v.tekst) : v.valgt;
   }
 
   _antal() {
-    return (this.data?.varer || []).filter((v) => this._valgt(v)).length;
+    return (this.data?.varer || []).filter((v) => !this._laast(v) && this._valgt(v)).length;
   }
 
   /* ------------------------------------------------------------ tegning */
@@ -134,6 +142,7 @@ class UgeVarer extends HTMLElement {
       ${d.har_vi_altid?.length ? `<p class="fod">Har vi altid (kommer ikke med): ${esc(d.har_vi_altid.join(", "))}.</p>` : ""}
       <details class="hvordan"><summary>ⓘ Sådan virker det</summary>
         <p>Varerne kommer fra jeres retter (Noter → Retter). <b>Kød fra fryseren</b> er fravalgt – tryk på varen, hvis I skal købe det. Varer, der allerede står på listen, eller som I har købt i denne uge, er også fravalgt.</p>
+        <p><b>Står varen allerede på listen</b> (fx mælk fra basislisten), men skal der mere til madlavningen, så tryk på den. Der kommer ingen ny linje – varen får et diskret <b>+</b> på listen, som forsvinder igen, når den er købt.</p>
         <p><b>Køleskabet</b> (Noter → Køleskab): rester mærket <i>Nok</i> er fravalgt (🧊 i køleskabet); rester mærket <i>Lidt</i> købes stadig, men er mærket.</p>
         <p>Retter uden varer: tryk <i>Skriv varerne</i>. Listen huskes, så retten næste gang fylder indkøbslisten selv.</p>
         <p>Varerne lægges på listen som engangsvarer med retten skrevet med småt under – så kan I se i butikken, hvad den skal bruges til.</p>
@@ -199,10 +208,15 @@ class UgeVarer extends HTMLElement {
       const head = v.kategori !== sidst ? `<div class="kat">${esc(kat(v.kategori))}</div>` : "";
       sidst = v.kategori;
       const on = this._valgt(v);
+      const laast = this._laast(v);
       const kol = !v.paa_listen && v.koleskab && /køleskab/.test(v.grund || ""); // 0.12.5
       const frost = !v.paa_listen && v.koed && !kol;
-      const grund = v.grund ? `<span class="grund ${frost || kol ? "frost" : ""}">${kol ? "🧊 " : frost ? "❄ " : ""}${esc(v.grund)}</span>` : "";
-      return `${head}<button class="vare ${v.paa_listen ? "paa" : ""}" data-a="vare" data-i="${i}" role="checkbox" aria-checked="${on}" ${v.paa_listen ? "disabled" : ""}>
+      // 0.17.1: på listen + valgt = "+" (køb mere); allerede "+" på listen = låst
+      const plus = v.paa_listen && (v.mere || on);
+      const gt = plus ? (v.mere ? "+ på listen" : "+ køb mere") : v.grund;
+      const grund = gt ? `<span class="grund ${frost || kol ? "frost" : ""} ${plus ? "plus" : ""}">${kol ? "🧊 " : frost ? "❄ " : ""}${esc(gt)}</span>` : "";
+      const tip = v.paa_listen && !laast ? ` title="Står på listen – tryk, hvis der skal mere til madlavning"` : "";
+      return `${head}<button class="vare ${laast ? "paa" : ""} ${v.paa_listen ? "paalisten" : ""}" data-a="vare" data-i="${i}" role="checkbox" aria-checked="${on}" ${laast ? "disabled" : ""}${tip}>
           <span class="chk" aria-hidden="true"></span>
           <span class="vt"><span class="vn">${esc(v.tekst)}</span><small>${esc(v.retter.join(" · "))}${v.erstatter?.length ? ` · i stedet for ${esc(v.erstatter.join(", ").toLowerCase())}` : ""}</small></span>
           ${grund}
@@ -230,7 +244,7 @@ class UgeVarer extends HTMLElement {
     }
     if (a === "vare") {
       const v = this.data.varer[Number(b.dataset.i)];
-      if (!v || v.paa_listen) return;
+      if (!v || this._laast(v)) return;
       this._valg.set(v.tekst, !this._valgt(v));
       return this._renderBody();
     }
@@ -295,23 +309,31 @@ class UgeVarer extends HTMLElement {
   }
 
   async _tilfoej() {
-    const valgte = this.data.varer.filter((v) => this._valgt(v));
+    const valgte = this.data.varer.filter((v) => !this._laast(v) && this._valgt(v));
     if (!valgte.length || this._busy) return;
     this._busy = true;
     this._renderBody();
     try {
       // 0.13.0: arkets version sendes med – er madplanen ændret siden, lægges intet på listen
       const res = await this.store.send("indkob/tilfoej_retter", {
-        varer: valgte.map((v) => ({ tekst: v.tekst, retter: v.retter })),
+        varer: valgte.map((v) => ({ tekst: v.tekst, retter: v.retter, ...(v.paa_listen ? { mere: true } : {}) })),
         madplan_version: this.data.madplan_version,
       });
       const n = res.tilfoejet.length;
       const ids = res.ids || [];
+      const plus = res.mere_foer || [];
+      const dele = [];
+      if (n || !plus.length) dele.push(`${n} ${n === 1 ? "vare" : "varer"} til ugens retter er sat på listen`);
+      if (plus.length) dele.push(`${plus.length} ${plus.length === 1 ? "vare" : "varer"} på listen fik + (skal bruges mere)`);
+      const fortryd = async () => {
+        if (ids.length) await this.store.send("indkob/delete", { line_ids: ids });
+        if (plus.length) await this.store.send("indkob/fortryd_mere", { linjer: plus });
+      };
       this.dispatchEvent(new CustomEvent("im-toast", {
         bubbles: true, composed: true,
         detail: {
-          text: `${n} ${n === 1 ? "vare" : "varer"} til ugens retter er sat på listen` + (res.fandtes.length ? ` (${res.fandtes.length} stod der)` : ""),
-          actions: ids.length ? [{ label: "Fortryd", action: () => this.store.send("indkob/delete", { line_ids: ids }) }] : [],
+          text: dele.join(" · ") + (res.fandtes.length ? ` (${res.fandtes.length} stod der)` : ""),
+          actions: ids.length || plus.length ? [{ label: "Fortryd", action: fortryd }] : [],
           ms: 7000,
         },
       }));
@@ -444,6 +466,7 @@ const CSS = `
   .vt small { font-size: 12px; color: var(--im-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .grund { flex: none; max-width: 42%; font-size: 12px; color: var(--im-dim); padding: 2px 8px; border-radius: 10px; background: var(--im-bg2);
            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .grund.plus { color: var(--im-acc-strong, var(--im-acc)); font-weight: 600; }
   .grund.frost { color: var(--im-frost, #2b7bd6); background: color-mix(in srgb, var(--im-frost, #2b7bd6) 14%, transparent); }
   .tomtekst { color: var(--im-dim); font-size: 14px; margin: 14px 4px; }
   .fod { color: var(--im-dim); font-size: 13px; margin: 12px 4px 0; line-height: 1.4; }

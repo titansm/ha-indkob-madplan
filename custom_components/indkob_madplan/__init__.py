@@ -69,7 +69,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_indkob__butik_afslut, ws_indkob__butik_ret, ws_indkob__butik_fortryd, ws_indkob__fast,
         ws_retter__liste, ws_retter__hent, ws_retter__gem, ws_retter__paa_listen,
         ws_omregning__hent, ws_omregning__saet, ws_opskrifter__importer,
-        ws_madplan__varer, ws_indkob__tilfoej_retter, ws_stats__slet_vare,
+        ws_madplan__varer, ws_indkob__tilfoej_retter, ws_indkob__fortryd_mere, ws_stats__slet_vare,
         ws_madplan__kladde__hent, ws_madplan__kladde__gem, ws_madplan__kladde__slet,
         ws_koleskab__tilfoej, ws_koleskab__saet, ws_koleskab__fjern, ws_koleskab__ny_planlaegning,
         ws_madplan__versioner, ws_butik__orden__saet, ws_butik__orden__nulstil,
@@ -439,11 +439,21 @@ def ws_madplan__varer(m: IndkobMadplanManager, msg: dict, user: str | None) -> d
 @_ws({vol.Required("varer"): vol.All([{
     vol.Required("tekst"): vol.All(str, vol.Length(min=1, max=200)),
     vol.Optional("retter", default=list): [vol.All(str, vol.Length(max=120))],
+    vol.Optional("mere", default=False): bool,  # 0.17.1: står varen på listen, får den et "+"
 }], vol.Length(max=120)),
     vol.Optional("madplan_version"): vol.Any(int, None),  # 0.13.0: arkets version – forældet = afvist
 })
 def ws_indkob__tilfoej_retter(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
     return m.tilfoej_til_retter(msg["varer"], user, madplan_version=msg.get("madplan_version"))
+
+
+@_ws({vol.Required("linjer"): vol.All([{
+    vol.Required("id"): str,
+    vol.Optional("ret", default=list): [vol.All(str, vol.Length(max=120))],
+}], vol.Length(max=120))})
+def ws_indkob__fortryd_mere(m: IndkobMadplanManager, msg: dict, user: str | None) -> dict:
+    """0.17.1: Fortryd "+" fra "Varer til ugen"."""
+    return {"antal": m.fortryd_mere(msg["linjer"], user)}
 
 
 @_ws({vol.Required("navn"): vol.All(str, vol.Length(min=1, max=200))})

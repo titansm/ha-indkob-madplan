@@ -1,5 +1,5 @@
 /* Fælles kode for panel og kort: forbindelse, tjekliste, madplan-visning, statistik. */
-export const VERSION = "0.17.0";
+export const VERSION = "0.17.1";
 export const PANEL_PATH = "/indkob-madplan";
 const KORT_DAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 export const UGEDAGE = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
@@ -758,9 +758,9 @@ export class Checklist {
         : `<span class="pin" aria-hidden="true" title="Engangsvare – forsvinder efter indkøb">Engangs</span>`;
       inner = (this.checkbox ? `<button class="chk" type="button" role="checkbox" aria-label="Afkryds"></button>` : "") +
         (this.editable
-          ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />${pin}` +
+          ? `<input class="tx" type="text" enterkeyhint="next" aria-label="Vare" />${MERE}${pin}` +
             `<span class="grip" role="button" aria-label="Træk for at flytte varen" title="Træk for at flytte">${GRIP}</span>`
-          : `<span class="tx"></span>${pin}`) +
+          : `<span class="tx"></span>${MERE}${pin}`) +
         `<span class="retm"></span>`;
     } else if (ln.type === "header") {
       inner = this.editable
@@ -778,6 +778,7 @@ export class Checklist {
     row.classList.toggle("done", !!ln.checked);
     row.classList.toggle("fast", !!ln.fast);
     row.classList.toggle("engangs", ln.type === "item" && ln.fast === false && !!(ln.text || "").trim());
+    row.classList.toggle("mere", ln.type === "item" && !!ln.mere);
     const butik = ln.checked ? this.bought.get(ln.id) : null;
     row.classList.toggle("koebt", !!butik);
     if (butik) row.firstElementChild.dataset.butik = butik;
@@ -960,6 +961,9 @@ const REVEAL = 84; // bredde på "Slet" når rækken er swipet halvt
 const FULL = 0.55; // andel af rækkens bredde, der sletter med det samme
 
 const PLUS = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>`;
+// 0.17.1: "+" ud for en vare, der også skal bruges til ugens retter (sat fra "Varer til ugen")
+const MERE = `<span class="mere" aria-label="Skal også bruges til madlavning – køb lidt mere" title="Skal også bruges til madlavning – køb lidt mere">+</span>`;
+
 export const PIN = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2Z"/></svg>`;
 const GRIP = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 8h16v1.8H4zm0 6.2h16V16H4z"/></svg>`;
 
@@ -1166,6 +1170,10 @@ export const BASE_CSS = `
   .ln .pin { display: none; flex: none; align-items: center; font-size: 11px; font-weight: 600; letter-spacing: .02em;
              padding: 3px 8px; border-radius: 10px; color: var(--im-dim); border: 1px dashed var(--im-dim); opacity: .8; }
   .ln.engangs .pin { display: inline-flex; }
+  .ln .mere { display: none; flex: none; align-items: center; justify-content: center; min-width: 20px; height: 20px;
+              font-size: 15px; font-weight: 700; line-height: 1; color: var(--im-acc-strong, var(--im-acc)); opacity: .85; cursor: default; }
+  .ln.mere .mere { display: inline-flex; }
+  .ln.mere.done .mere { opacity: .4; }
   .ln.done .pin { opacity: .45; }
   button.pin { cursor: pointer; }
   button.pin:active { background: var(--im-bg2); }
